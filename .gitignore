@@ -1,3 +1,5 @@
 dataset/
 test/
-vlm-mappping/
+MLLM/LLaVA/scripts/v1_5/checkpoints/
+MLLM/LLaVA/scripts/v1_5/logs/
+MLLM/LLaVA/scripts/v1_5/wandb
