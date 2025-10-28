@@ -1,3 +1,5 @@
+# /dev/shm 限制
+
 #!/usr/bin/env bash
 set -euo pipefail
 
