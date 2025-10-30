@@ -20,7 +20,7 @@ export TORCH_HOME=/localdata/torch_tmp
 # ======【参数：可按需改】======
 IMG_DIR="/tmp/localdata/LLaVA_pretrain"
 DATA_JSON="/workspace/MMalign/dataset/LLaVA/LLaVA-pretrain/blip_laion_cc_sbu_558k.json"
-OUT_DIR="./checkpoints/llava-v1.5-7b-pretrain/20251028"
+OUT_DIR="./checkpoints/llava-v1.5-7b-pretrain/20251029"
 LOG_DIR="./logs"
 mkdir -p "$LOG_DIR" "$OUT_DIR"
 
@@ -101,12 +101,15 @@ trap cleanup EXIT INT TERM
 
 # ======【Deepspeed 每 rank 日志】======
 DS_ARGS="--enable_each_rank_log"
+RESUME_CKPT=/workspace/MMalign/MLLM/LLaVA/scripts/v1_5/checkpoints/llava-v1.5-7b-pretrain/20251029/checkpoint-1200
+# 
 
 # ======【启动训练（照你的参数，仅把日志与监控增强）】======
 echo "[RUN] 启动训练..."
 nohup deepspeed --num_gpus=4 /workspace/MMalign/MLLM/LLaVA/llava/train/train_mem.py \
   --deepspeed ../zero2.json \
   --model_name_or_path /tmp/models/vicuna-7b-v1.5 \
+  --resume_from_checkpoint $RESUME_CKPT$ \
   --version plain \
   --data_path "$DATA_JSON" \
   --image_folder "$IMG_DIR" \

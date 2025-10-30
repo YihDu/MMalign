@@ -1,0 +1,18 @@
+mode: sae
+
+model:
+  name: /workspace/models/llava-v1.5-7b
+  layers: ["projector", "llama8", "llama16"]
+  ckpt_path_folder: ../../ckpt/ckpt_LLaVA15_pretrain/20251029
+  token_scopes: ["text_all"]
+  text_model_name_or_path: /tmp/models/vicuna-7b-v1.5
+  vision_model_name_or_path: /tmp/models/clip-vit-large-patch14-336
+
+paths:
+  forward_data_path_json: /tmp/localdata/COCO2017/annotations/captions_train2017.json 
+  forward_data_path: /tmp/localdata/COCO2017/train2017
+  activation_save_dir: ./activations_sae/
+device: cuda:0
+batch_size: 128
+num_samples: 500
+seed: 42

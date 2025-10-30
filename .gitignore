@@ -2,4 +2,5 @@ dataset/
 test/
 MLLM/LLaVA/scripts/v1_5/checkpoints/
 MLLM/LLaVA/scripts/v1_5/logs/
-MLLM/LLaVA/scripts/v1_5/wandb
+MLLM/LLaVA/scripts/v1_5/wandb/
+Analysis/ckpt/
