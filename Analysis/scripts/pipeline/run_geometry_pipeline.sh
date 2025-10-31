@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
 CONFIG="config/spectral_analysis.yaml"

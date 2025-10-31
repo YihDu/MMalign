@@ -1,4 +1,4 @@
-# ========== 基础设置 ==========
+# basic
 mode: spectral
 device: cuda
 num_samples: 10000
@@ -6,28 +6,28 @@ batch_size: 128
 seed: 42 # 从数据集sample
 task_name: LLaVA_15_pretrain
 
-# ========== 路径设置 ==========
+# path
 paths:
-  ckpt_dir: ./checkpoints/${task_name}
-  activation_save_dir: ./results/${task_name}/geometry
+  ckpt_dir: ../../ckpt/ckpt_LLaVA15_pretrain/20251029
+  activation_save_dir: ./results/${task_name}/geometry # Todo
   forward_data_path: /data/coco/train2017
   forward_data_path_json: /data/coco/annotations/captions_train2017.json
 
-# ========== 模型参数 ==========
+# model
 model:
   text_model_name_or_path: /tmp/models/vicuna-7b-v1.5
   vision_model_name_or_path: /tmp/models/clip-vit-large-patch14-336
   target_layer: last          # last / penultimate / all
   token_scope: text_last      # text_last / text_all / vision_all / all
 
-# ========== 分析参数 ==========
+# analysis
 analysis:
   metrics:
     - rankme
     - alpha_req
     - effective_rank
 
-# ========== 可视化参数 ==========
+# visual
 plot:
   show_rank_curve: true
   show_singular_spectrum: true
