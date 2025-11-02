@@ -185,24 +185,51 @@ if __name__ == "__main__":
     
 
     if mode == "spectral":
-        # === 谱分析：单层 + 单 token_scope ===
-        feats = extract_features(
-            model=model,
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            dataset=dataset,
-            target_layer=cfg.model.target_layer,
-            token_scope=cfg.model.token_scope,
-            device=cfg.device,
-            batch_size=cfg.batch_size,
-        )
-        os.makedirs(cfg.paths.activation_save_dir, exist_ok=True)
-        out_path = os.path.join(
-            cfg.paths.activation_save_dir,
-            f"features_{cfg.model.target_layer}_{len(dataset)}.npy",
-        )
-        np.save(out_path, feats.numpy())
-        print(f"✅ [Spectral] Saved {feats.shape} to {out_path}")
+        print("🎯 模式: spectral analysis (跨 ckpt × 所有层)")
+
+        ckpt_path_folder = cfg.model.get("ckpt_path_folder", None)
+
+        token_scopes = cfg.model.get("token_scopes")
+        if token_scopes is None:
+            # 兼容旧配置，仅提供单个 token_scope
+            single_scope = cfg.model.get("token_scope")
+            if single_scope is None:
+                raise ValueError("未在配置中指定 token_scope / token_scopes")
+            token_scopes = [single_scope]
+
+        out_dir = cfg.paths.activation_save_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        print(f"读取文件夹 {ckpt_path_folder} 中 checkpoint")
+        if ckpt_path_folder:
+            pattern = os.path.join(ckpt_path_folder, "checkpoint-*", "mm_projector.bin")
+            ckpt_list = sorted(glob.glob(pattern))
+            print(f"一共 {len(ckpt_list)} 个 checkpoint")
+        else:
+            raise ValueError("ckpt路径错误")
+
+        # === 遍历每个 checkpoint ===
+        for ckpt in tqdm(ckpt_list):
+            print(f"📦 Loading checkpoint: {ckpt}")
+            tokenizer, model, image_processor = build_llava_from_vicuna_and_clip(cfg, ckpt)
+
+            for token_scope in token_scopes:
+                feats_dict = extract_features(
+                    model=model,
+                    tokenizer=tokenizer,
+                    image_processor=image_processor,
+                    dataset=dataset,
+                    token_scope=token_scope,
+                    device=cfg.device,
+                    batch_size=cfg.batch_size,
+                )
+
+                tag_ckpt = os.path.basename(os.path.dirname(ckpt))
+                for layer_idx, feats in feats_dict.items():
+                    out_name = f"spectral_layer{layer_idx}_{token_scope}_{tag_ckpt}.npy"
+                    out_path = os.path.join(out_dir, out_name)
+                    np.save(out_path, feats.numpy())
+                    print(f"✅ [Spectral] Saved {feats.shape} from layer {layer_idx} to {out_path}")
 
     elif mode == "sae":
         # print("当前工作目录:", os.getcwd())
@@ -250,4 +277,3 @@ if __name__ == "__main__":
                 
         else:
             raise ValueError("mode 错误")
-
