@@ -15,7 +15,7 @@ import json, os, random, yaml
 from easydict import EasyDict as edict
 import glob
 from types import SimpleNamespace,MethodType
-
+import gc
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
@@ -209,7 +209,7 @@ if __name__ == "__main__":
             raise ValueError("ckpt路径错误")
 
         # === 遍历每个 checkpoint ===
-        for ckpt in tqdm(ckpt_list):
+        for ckpt in tqdm(ckpt_list[:5]): # 测试前5个ckpt
             print(f"📦 Loading checkpoint: {ckpt}")
             tokenizer, model, image_processor = build_llava_from_vicuna_and_clip(cfg, ckpt)
 
@@ -230,6 +230,13 @@ if __name__ == "__main__":
                     out_path = os.path.join(out_dir, out_name)
                     np.save(out_path, feats.numpy())
                     print(f"✅ [Spectral] Saved {feats.shape} from layer {layer_idx} to {out_path}")
+            
+            # === 释放显存 ===
+            del model, tokenizer, image_processor
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            
 
     elif mode == "sae":
         # print("当前工作目录:", os.getcwd())

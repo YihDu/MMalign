@@ -4,3 +4,5 @@ MLLM/LLaVA/scripts/v1_5/checkpoints/
 MLLM/LLaVA/scripts/v1_5/logs/
 MLLM/LLaVA/scripts/v1_5/wandb/
 Analysis/ckpt/
+Analysis/scripts/pipeline/results/
+Analysis/scripts/utils/__pycache__/

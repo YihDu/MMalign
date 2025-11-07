@@ -1,10 +1,16 @@
+import sys
 import os
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../.."))
+sys.path.append(PROJECT_ROOT)
+
+
 import re
 import json
 import numpy as np
 from tqdm import tqdm
-from utils.config_loader import load_config
-from utils.spectral_metrics import (
+from scripts.utils.config_loader import load_config
+from scripts.utils.spectral_metrics import (
     compute_rankme,
     compute_alpha_req,
     compute_effective_rank,

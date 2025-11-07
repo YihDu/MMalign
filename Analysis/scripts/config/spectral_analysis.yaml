@@ -1,7 +1,7 @@
 # basic
 mode: spectral
 device: cuda
-num_samples: 500
+num_samples: 5000
 batch_size: 128
 seed: 42 # 从数据集sample
 task_name: LLaVA_15_pretrain
