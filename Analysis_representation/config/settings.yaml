@@ -1,0 +1,32 @@
+experiment:
+  name: multilingual_alignment_baseline
+  seed: 42
+  sample_size: 64
+  languages:
+    - en
+    - jp-stair
+    - cn
+
+data:
+  coco:
+    data_dir: /root/personal/datasets/COCO_multilingual/data
+    splits:
+      - train
+      - restval
+    caption_index: 0
+    filter_empty_languages: true
+
+model:
+  name: liuhaotian/llava-v1.5-13b
+  revision: main
+  device: cuda
+  dtype: auto
+
+analysis:
+  metrics:
+    - cosine_distance
+  statistics:
+    t_test: true
+
+visualization:
+  output_dir: report/figures

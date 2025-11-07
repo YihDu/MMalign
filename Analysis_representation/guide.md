@@ -1,170 +1,140 @@
-# **实验 1：验证视觉信息在多语言表征对齐中的因果作用**
+# **多语言视觉锚定实验全流程指南**
 
-## **项目背景**
-
-在多语言视觉-语言模型（Multilingual Vision-Language Models，简称 MLLMs）中，视觉信息是否能显著增强并对齐不同语言的表征是一个重要问题。本实验旨在验证图像作为外部证据锚点，如何通过视觉信息增强并对齐多语言文本中的表征，特别是验证 **视觉信息** 如何影响不同语言对同一具体概念的对齐效果。
-
-## **实验目标**
-
-**核心假设：**
-视觉信息（图像）作为一种外部证据锚点，能够因果性地增强并对齐不同语言（如中英文）中对同一具体概念的表征。我们假设这种对齐是选择性的，主要作用于可被视觉锚定的概念（如物体、属性）。我们通过三组对照实验来验证这一假设。
-
-1. **验证目标：**
-
-   * 提供正确的视觉上下文（图像）是否能显著拉近多语言概念的表征距离。
-   * 提供错误的视觉上下文（不相关的图像）是否能破坏或减弱对齐效果。
-   * 计算不同条件下的 **余弦距离**（Cosine Distance）来量化对齐效果。
-
-2. **实验设计：**
-   实验将使用多模态大语言模型（如 LLaVA），并以 COCO 2017 数据集中的图像和多语言文本为基础，进行以下实验设计：
-
-   * **三组对照实验：**
-
-     * **无锚定基线（Baseline Condition）：** 仅使用文本数据进行对齐计算。
-     * **正确锚定（Correct Anchoring）：** 使用图像和文本输入，计算文本和图像的对齐效果。
-     * **错误锚定（Mismatched Anchoring）：** 使用不相关的图像和文本进行计算，测试是否图像的语义内容影响对齐效果。
-
-## **项目结构与模块化**
-
-为了确保代码的可维护性和可扩展性，项目分为以下几个模块：
-
-### **1. 数据准备模块（`/data`）**
-
-* **功能：** 负责加载图像数据（如 COCO 数据集），筛选目标物体类别（如狗、汽车），并提供多语言的描述文本。支持英文到目标语言（如中文）的自动翻译。
-
-### **2. 模型加载模块（`/models`）**
-
-* **功能：** 使用 Hugging Face 提供的 `from_pretrained` 方法加载预训练的 LLaVA 模型及其处理器，并确保模型能够支持图像和多语言文本的输入。
-
-### **3. 实验设计与执行模块（`/experiment`）**
-
-* **功能：** 负责控制实验流程，包括创建三组对照实验（基线、正确锚定、错误锚定），并计算每个实验组的对齐效果（使用余弦距离度量）。
-
-### **4. 结果分析与评估模块（`/analysis`）**
-
-* **功能：** 对实验结果进行统计分析，计算每组实验的余弦距离并进行显著性检验。
-
-### **5. 可视化模块（`/visualization`）**
-
-* **功能：** 将实验结果进行可视化，绘制图表展示不同实验组之间的对齐效果差异。
-
-### **6. 主程序（`main.py`）**
-
-* **功能：** 主程序负责协调所有模块的执行，从配置文件中读取设置并控制实验的整体执行。
-
-## **实验设计**
-
-### **1. 实验组设计**
-
-* **无锚定基线（Baseline Condition）：**
-
-  * 不使用图像，仅根据文本描述计算英文和中文之间的余弦距离。
-* **正确锚定（Correct Anchoring）：**
-
-  * 使用图像和对应的文本描述，计算图像和多语言描述之间的余弦距离。
-* **错误锚定（Mismatched Anchoring）：**
-
-  * 使用图像和无关的文本描述（如汽车图像与“狗”的描述），计算余弦距离。
-
-### **2. 输入数据**
-
-* **图像数据：** 使用 COCO 2017 数据集中的图像。
-* **文本描述：** 为每个图像提供多语言描述（例如，英文和中文）。
-  这些文本描述将由 `captions_dict` 提供，格式如下：
-
-  ```python
-  captions_dict = {
-      'en': "A dog is playing in the park.",
-      'zh': "一只狗在公园里玩耍。",
-      'fr': "Un chien joue dans le parc."
-  }
-  ```
-
-### **3. 输出指标**
-
-* **余弦距离（Cosine Distance）：**
-  余弦距离作为衡量对齐效果的标准，距离越小表示表征越接近，对齐效果越好。
-* **统计显著性：**
-  使用 t 检验（或其他统计方法）对不同实验组的对齐效果进行显著性分析。
-
-## **TODO List**
-
-### **1. 数据准备**
-
-* [ ] **加载图像数据：** 从 COCO 2017 数据集加载图像。
-* [ ] **筛选目标物体类别：** 选择如 `dog`、`car` 等具体物体进行实验。
-* [ ] **多语言描述生成：**
-
-  * 通过翻译 API（如 DeepL 或 Google Translate）翻译英文描述成其他语言（如中文、法文）。
-  * 确保不同语言的翻译语义一致性。
-
-### **2. 模型加载**
-
-* [ ] **加载 LLaVA 模型：** 使用 Hugging Face 的 `from_pretrained` 方法加载 LLaVA 或其他多模态模型。
-* [ ] **处理图像和文本输入：** 配置模型的处理器，以支持图像和多语言文本输入。
-
-### **3. 实验设计**
-
-* [ ] **无锚定基线实验：** 计算并返回基线实验组中多语言描述的余弦距离。
-* [ ] **正确锚定实验：** 计算图像和多语言描述之间的余弦距离。
-* [ ] **错误锚定实验：** 使用不相关图像和文本计算余弦距离。
-
-### **4. 结果分析**
-
-* [ ] **计算余弦距离：** 在每个实验组中计算图像和文本之间的余弦距离。
-* [ ] **统计显著性：** 使用 t 检验等方法分析不同实验组之间的显著性差异。
-
-### **5. 可视化**
-
-* [ ] **绘制结果图：** 使用 Matplotlib 绘制不同实验组之间的对齐效果图表。
-
-### **6. 文档与报告**
-
-* [ ] **撰写实验报告：** 总结实验方法、数据、结果和分析。
-* [ ] **代码注释与文档：** 适当注释代码，确保代码的可读性与可维护性。
+本文档面向开发者，汇总仓库当前（Parquet 版 COCO 多语言数据）所需的全部操作步骤，从数据加载到结果分析的完整路径。
 
 ---
 
-## **实验执行流程**
+## 1. 实验目标回顾
 
-1. **数据加载与预处理：**
-
-   * 加载图像和文本描述数据。
-   * 使用翻译 API 进行多语言翻译。
-
-2. **模型加载：**
-
-   * 使用预训练的 LLaVA 模型进行推理。
-
-3. **实验执行：**
-
-   * 运行三组对照实验（基线、正确锚定、错误锚定）。
-
-4. **结果分析：**
-
-   * 计算余弦距离，分析对齐效果。
-
-5. **结果可视化：**
-
-   * 绘制图表并展示实验结果。
-
-6. **实验报告：**
-
-   * 撰写实验报告，分析结果并得出结论。
+- **核心问题**：视觉信息能否作为因果锚点，强化多语言文本表征的对齐？
+- **实验条件**：
+  - `baseline` —— 仅文本（无视觉锚定）。
+  - `correct` —— 图像与对应语言描述匹配。
+  - `mismatched` —— 图像与语言描述打乱，对应错误锚定。
+- **主要指标**：每个条件/语言的嵌入余弦距离；在 `analysis.statistics.t_test=true` 时，对 `baseline` vs `correct` 做独立样本 t 检验。
 
 ---
 
-### **最终期望结果**
+## 2. 数据来源与加载
 
-我们预期会观察到一个清晰的、具有统计显著性的排序：
-
-* **Dist_anchored < Dist_baseline < Dist_mismatched**
-
-  * **Dist_anchored < Dist_baseline**：证明正确的视觉上下文可以显著增强多语言概念的对齐。
-  * **Dist_baseline < Dist_mismatched**：证明错误的视觉上下文（与文本不相关的图像）不仅无法增强对齐，反而会破坏对齐效果。
+- **数据格式**：参照 `data_guide.md`，数据位于 `/root/personal/datasets/COCO_multilingual/data`，以 Hugging Face `datasets` 的 Parquet 分片形式提供。
+- **加载方式**：`data/coco_loader.py` 通过 `load_dataset("parquet", data_files=...)` 读取 `train/val/test/restval` 等 split，并自动拼接所需子集。
+- **样本结构**：字段包含 `cocoid`, `filename`, `image`（PIL 对象）及多语言 caption 列（`en`, `cn`, `jp-stair`, ...，每列为最多 5 条描述）。
+- **可选策略**：
+  - `caption_index`：优先取某条描述（默认 0，若为空则回退到首个非空）。
+  - `filter_empty_languages`：是否过滤缺少文本的样本。
+  - `language_aliases`：当配置语言与列名不一致时做映射，例如 `zh -> cn`。
 
 ---
 
-## **结语**
+## 3. 代码架构速览
 
-这个实验将帮助我们深入理解视觉信息在多语言表征对齐中的作用，尤其是验证视觉内容是否仅在语义一致时才有效地锚定和组织多语言表征。通过精心设计的对照实验，我们能够清晰地展示视觉信息对多语言模型的因果影响。
+| 模块 | 作用 |
+| --- | --- |
+| `config/settings.yaml` | 统一管理实验参数（语言、样本数、数据 split、模型、分析/可视化选项）。 |
+| `data/coco_loader.py` | 读取 Parquet 数据，构造 `SampleBatch`。 |
+| `models/llava_loader.py` | 按配置加载 LLaVA 模型与 Processor。 |
+| `models/embedding.py` | 将 `SampleBatch` 转成图像与多语言文本嵌入。 |
+| `experiment/conditions.py` | 定义 `baseline/correct/mismatched` 的样本编排逻辑。 |
+| `experiment/runner.py` | 调用嵌入函数、计算余弦距离，并聚合结果。 |
+| `analysis/*` | 提供余弦距离矩阵与统计检验。 |
+| `visualization/plot_distance_distributions` | 输出距离分布图。 |
+| `scripts/run_experiment.py` | 主脚本：串联配置 → 数据采样 → 模型推理 → 结果写入。 |
+| `scripts/prepare_data.py` | 轻量检查工具：抽取一批样本并打印多语言 caption，便于确认数据有效性。 |
+
+---
+
+## 4. 环境准备
+
+```bash
+pip install torch transformers datasets pillow numpy scipy matplotlib pyyaml pytest
+```
+
+> 若使用 GPU，请安装匹配的 `torch` 版本。`datasets` 与 `pillow` 为 Parquet+图像读取的必备依赖。
+
+---
+
+## 5. 全流程操作步骤
+
+### 5.1 配置实验
+
+编辑 `config/settings.yaml`：
+
+```yaml
+experiment:
+  sample_size: 64          # 每个条件的样本数
+  languages: [en, jp-stair, cn]
+
+data:
+  coco:
+    data_dir: /root/personal/datasets/COCO_multilingual/data
+    splits: [train, restval]
+    caption_index: 0
+    filter_empty_languages: true
+    language_aliases:
+      cn: cn   # 如需别名，可在此声明
+```
+
+- 若想扩展语言，只需在 `experiment.languages` 中添加字段，同时确保数据列存在。
+- `sample_size` 建议在 GPU/显存允许范围内调整；`build_batch` 会按配置随机抽样。
+
+### 5.2 预览样本（可选）
+
+```bash
+python scripts/prepare_data.py \
+  --data-dir /root/personal/datasets/COCO_multilingual/data \
+  --splits train restval \
+  --languages en jp-stair cn \
+  --limit 5
+```
+
+该命令会打印所选语言的 caption 片段，帮助快速确认数据质量与语言可用性。
+
+### 5.3 运行实验
+
+```bash
+python scripts/run_experiment.py --config config/settings.yaml --output report/summary.md
+# 或
+python main.py
+```
+
+执行流程：
+1. 解析配置 → 构建 `COCODataset`，拼接所需 split。
+2. 抽样 `sample_size` 个 `MultilingualExample`，确保所有语言均非空。
+3. 加载 LLaVA 模型，分别编码图像与文本。
+4. 针对 `baseline/correct/mismatched` 批量计算余弦距离。
+5. 输出：
+   - `report/summary.md`：条件 × 语言的均值统计。
+   - `report/figures/{condition}.png`：距离分布图。
+   - 控制台：若启用 t 检验，打印统计量与 p-value。
+
+### 5.4 结果与解读
+
+- 期望排序：`correct < baseline < mismatched`（越小越对齐）。
+- 若 `baseline` 与 `correct` 的均值差异显著且通过 t 检验，则支持“视觉锚定增强对齐”的假设。
+- 可结合 `analysis/statistics.py` 添加更多检验（如配对 t 检验、Bootstrap）。
+
+---
+
+## 6. 常见问题排查
+
+| 问题 | 原因 | 解决方案 |
+| --- | --- | --- |
+| `ImportError: datasets` / `ImportError: PIL` | 未安装依赖 | 按“环境准备”安装。 |
+| `ValueError: Unable to assemble batch...` | 指定语言数据不足 | 增大 `splits` / `sample_size`，或放宽 `filter_empty_languages`。 |
+| CUDA OOM | 样本数或模型过大 | 减少 `sample_size`、使用更小模型或切换到 CPU。 |
+| `FileNotFoundError: data_dir` | 配置路径错误 | 确认 Parquet 数据路径。 |
+| `KeyError` for language | 语言列不存在 | 在 `language_aliases` 中加映射，或调整 `experiment.languages`。 |
+
+---
+
+## 7. 下一步扩展
+
+1. **更多模型**：在 `models/llava_loader.py` 中新增配置，尝试不同规模或其他多模态模型（例如 BLIP-2）。
+2. **更多条件**：在 `experiment/conditions.py` 中加入噪声文本、图像扰动等额外对照组，分析鲁棒性。
+3. **指标拓展**：`analysis/metrics.py` 可新增欧氏距离、中心性衡量等，用于深化表征分析。
+4. **自动化报告**：结合 `report/summary.md` 与图表生成 LaTeX/HTML 报告，便于论文写作。
+
+---
+
+借助以上流程，可快速在本地复现实验，验证视觉信息在多语言表征对齐中的因果影响，并为进一步研究（例如跨语言检索、视觉提示学习）打下基础。祝实验顺利！
