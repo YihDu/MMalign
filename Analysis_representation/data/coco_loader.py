@@ -36,7 +36,7 @@ class COCODataset:
             raise ValueError("At least one dataset split must be provided.")
         self._data_dir = Path(data_dir)
         self._splits = list(splits)
-        self._rng = random.Random(seed)
+        self._rng = random.Random(seed) 
         self._caption_index = caption_index
         self._filter_empty = filter_empty_languages
         self._language_aliases: Mapping[str, str] = language_aliases or {}

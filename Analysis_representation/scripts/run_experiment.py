@@ -30,6 +30,7 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
     config = load_config(config_path)
     languages: Sequence[str] = config["experiment"]["languages"]
 
+    print("加载COCO数据集")
     # 加载多语言 COCO 数据，按照配置组合指定 split
     dataset_cfg = config["data"]["coco"]
     dataset = COCODataset(
@@ -40,7 +41,12 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
         filter_empty_languages=dataset_cfg.get("filter_empty_languages", True),
         language_aliases=dataset_cfg.get("language_aliases"),
     )
+    
+    print("加载COCO数据集完毕")
+    print("------------------------")
+    
 
+    print("加载 model")
     # 初始化 LLaVA 模型与对应 Processor
     loader = LLaVAModelLoader(
         LLaVALoaderConfig(
@@ -52,11 +58,24 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
     )
     model, processor = loader.load()
 
+
+    print("加载 model 完毕")
+    print("------------------------")
+
+    print("构建 batch")
     # 抽样构建包含所有目标语言的批次
     batch = dataset.build_batch(
         limit=config["experiment"].get("sample_size", 32),
         languages=languages,
     )
+    print("构建 batch 完毕")
+    print("------------------------")
+    
+    
+    # 内部就是一个 List[MultilingualExample]，每个 MultilingualExample 包含：
+    # image: ImageSample（含 image_id、image_data 或 image_path、filename、metadata）
+    # captions: Dict[str, CaptionSample]，键为语言代码，值里有 language、text、source
+    # 因此 build_batch 返回的对象可迭代 for example in batch，或用 batch.examples 直接访问所有 MultilingualExample，方便后续传给 experiment.runner.run_experiment()。
 
     # 执行三种条件，得到完整的 distance_map
     conditions = build_conditions()
@@ -73,6 +92,8 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
         json.dump(distance_map, handle, ensure_ascii=False, indent=2)
 
     print(f"distance_map written to {summary_path}")
+
+
 
 
 def main() -> None:

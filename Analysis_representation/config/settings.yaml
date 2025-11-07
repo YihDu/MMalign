@@ -1,7 +1,7 @@
 experiment:
   name: multilingual_alignment_baseline
   seed: 42
-  sample_size: 64
+  sample_size: 2
   languages:
     - en
     - jp-stair
@@ -11,14 +11,13 @@ data:
   coco:
     data_dir: /root/personal/datasets/COCO_multilingual/data
     splits:
-      - train
-      - restval
+      - val
     caption_index: 0
     filter_empty_languages: true
 
 model:
-  name: liuhaotian/llava-v1.5-13b
-  revision: main
+  name: llava-hf/llava-1.5-7b-hf
+  revision: 'a272c74' # 否则会有Bug
   device: cuda
   dtype: auto
 

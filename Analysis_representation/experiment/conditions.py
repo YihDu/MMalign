@@ -8,11 +8,12 @@ from data.schemas import MultilingualExample
 
 ConditionBuilder = Callable[[Iterable[MultilingualExample]], List[MultilingualExample]]
 
-
+# 
 def _identity(examples: Iterable[MultilingualExample]) -> List[MultilingualExample]:
     return list(examples)
 
-
+# image 与 captions 来自不同样本
+# 打乱
 def _mismatched(examples: Iterable[MultilingualExample]) -> List[MultilingualExample]:
     examples_list = list(examples)
     if len(examples_list) < 2:
