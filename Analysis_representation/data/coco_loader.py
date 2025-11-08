@@ -16,7 +16,7 @@ except ImportError as exc:  # pragma: no cover - depends on optional dependency
 
 from PIL import Image as PILImage
 
-from .schemas import CaptionSample, ImageSample, MultilingualExample, SampleBatch
+from data.schemas import CaptionSample, ImageSample, MultilingualExample, SampleBatch
 
 
 class COCODataset:

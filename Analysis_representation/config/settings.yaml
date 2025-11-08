@@ -22,6 +22,8 @@ model:
   dtype: auto
 
 analysis:
+  layer_mode: all
+  layer_indices: []
   metrics:
     - cosine_distance
   statistics:

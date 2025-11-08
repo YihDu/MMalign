@@ -13,11 +13,15 @@ from data import COCODataset
 from experiment import build_conditions, run_experiment
 from models.llava_loader import LLaVAModelLoader, LLaVALoaderConfig
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = PROJECT_ROOT / "config" / "settings.yaml"
+DEFAULT_OUTPUT = PROJECT_ROOT / "report" / "distance_map.json"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("config/settings.yaml"))
-    parser.add_argument("--output", type=Path, default=Path("report/distance_map.json"))
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser.parse_args()
 
 
@@ -85,6 +89,7 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
         batch=batch,
         conditions=conditions,
         languages=languages,
+        analysis_config=config.get("analysis", {}),
     )
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)

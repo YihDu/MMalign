@@ -1,4 +1,5 @@
-"""Model loading helpers for the multilingual vision-language experiments."""
+"""Model helper namespace."""
 
-from .embedding import encode_examples  # noqa: F401
-from .llava_loader import LLaVAModelLoader, LLaVALoaderConfig  # noqa: F401
+from . import embedding
+
+__all__ = ["embedding"]

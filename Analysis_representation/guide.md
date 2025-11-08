@@ -34,7 +34,7 @@
 | `config/settings.yaml` | 统一管理实验参数（语言、样本数、数据 split、模型、分析/可视化选项）。 |
 | `data/coco_loader.py` | 读取 Parquet 数据，构造 `SampleBatch`。 |
 | `models/llava_loader.py` | 按配置加载 LLaVA 模型与 Processor。 |
-| `models/embedding.py` | 将 `SampleBatch` 转成图像与多语言文本嵌入。 |
+| `models/embedding.py` | 将 `SampleBatch` 转成图像/文本每一层的 hidden state，并保留最终 pooled embedding 兼容旧指标。 |
 | `experiment/conditions.py` | 定义 `baseline/correct/mismatched` 的样本编排逻辑。 |
 | `experiment/runner.py` | 调用嵌入函数、计算余弦距离，并聚合结果。 |
 | `analysis/*` | 提供余弦距离矩阵与统计检验。 |
@@ -73,10 +73,19 @@ data:
     filter_empty_languages: true
     language_aliases:
       cn: cn   # 如需别名，可在此声明
+
+analysis:
+  layer_mode: all          # all / indices / final
+  layer_indices: []        # layer_mode=indices 时填写
+  metrics:
+    - cosine_distance
+  statistics:
+    t_test: true
 ```
 
 - 若想扩展语言，只需在 `experiment.languages` 中添加字段，同时确保数据列存在。
 - `sample_size` 建议在 GPU/显存允许范围内调整；`build_batch` 会按配置随机抽样。
+- `analysis.layer_mode` 控制 `run_experiment` 使用哪些层做距离计算：`final`（仅 pooled）、`all`（默认，遍历每层）、`indices`（只保留 `layer_indices` 指定层）。
 
 ### 5.2 预览样本（可选）
 
@@ -107,12 +116,14 @@ python main.py
    - `report/summary.md`：条件 × 语言的均值统计。
    - `report/figures/{condition}.png`：距离分布图。
    - 控制台：若启用 t 检验，打印统计量与 p-value。
+   - `report/distance_map.json`：详细的层级距离列表，键名形如 `cosine_en_layer_03`。
 
 ### 5.4 结果与解读
 
 - 期望排序：`correct < baseline < mismatched`（越小越对齐）。
 - 若 `baseline` 与 `correct` 的均值差异显著且通过 t 检验，则支持“视觉锚定增强对齐”的假设。
 - 可结合 `analysis/statistics.py` 添加更多检验（如配对 t 检验、Bootstrap）。
+- 针对多层输出，可绘制层序号 vs. 平均距离曲线，观察哪些深度对齐效果最佳；若 `layer_mode=indices`，则只关注指定层的统计。
 
 ---
 

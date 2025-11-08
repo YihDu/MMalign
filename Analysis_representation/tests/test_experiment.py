@@ -1,6 +1,7 @@
 import numpy as np
 from data.schemas import CaptionSample, ImageSample, MultilingualExample, SampleBatch
 from experiment import build_conditions, run_experiment
+from models.embedding import EmbeddingBatch, MultilayerEmbedding
 
 
 class DummyModel:
@@ -59,6 +60,17 @@ def make_sample_batch() -> SampleBatch:
 def test_runner_produces_results(monkeypatch):
     batch = make_sample_batch()
     conditions = build_conditions()
+
+    def fake_encode_examples(examples, *_args, **_kwargs):
+        example_list = list(examples)
+        count = len(example_list)
+        per_layer = [np.zeros((count, 2))]
+        embedding = MultilayerEmbedding(per_layer=per_layer, pooled=per_layer[-1])
+        captions = {"en": embedding, "zh": embedding}
+        return EmbeddingBatch(images=embedding, captions=captions)
+
+    monkeypatch.setattr("experiment.runner.encode_examples", fake_encode_examples)
+
     distance_map = run_experiment(
         model=DummyModel(),
         processor=DummyProcessor(),

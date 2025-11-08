@@ -5,9 +5,18 @@ from .schemas import (
     ImageSample,
     MultilingualExample,
     SampleBatch,
-)  # noqa: F401
+)  
 
 try:
-    from .coco_loader import COCODataset  # noqa: F401
-except ImportError:  # pragma: no cover - optional dependency
-    COCODataset = None  # type: ignore
+    from .coco_loader import COCODataset as _COCODatasetImpl
+except ImportError as exc:  # pragma: no cover - optional dependency
+    class COCODataset:  # type: ignore[override]
+        """Placeholder that explains the missing optional dependency."""
+
+        def __init__(self, *_, **__):
+            raise ImportError(
+                "COCODataset requires the optional `datasets` package. "
+                "Install it via `pip install datasets`."
+            ) from exc
+else:
+    COCODataset = _COCODatasetImpl
