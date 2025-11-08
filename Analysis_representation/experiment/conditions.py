@@ -8,7 +8,7 @@ from data.schemas import MultilingualExample
 
 ConditionBuilder = Callable[[Iterable[MultilingualExample]], List[MultilingualExample]]
 
-# 
+# 原始样本
 def _identity(examples: Iterable[MultilingualExample]) -> List[MultilingualExample]:
     return list(examples)
 
