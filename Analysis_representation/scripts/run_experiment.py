@@ -30,6 +30,13 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(handle)
 
 
+def _preview_text(text: str, limit: int = 80) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
 def run_pipeline(config_path: Path, summary_path: Path) -> None:
     config = load_config(config_path)
     languages: Sequence[str] = config["experiment"]["languages"]
@@ -74,6 +81,24 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
     )
     print("构建 batch 完毕")
     print("------------------------")
+
+    print(f"[debug][batch] size={len(batch.examples)} languages={list(languages)}")
+    if batch.examples:
+        sample = batch.examples[0]
+        filename = sample.image.filename or "N/A"
+        print(
+            f"[debug][batch] sample image_id={sample.image.image_id} "
+            f"filename={filename} metadata={sample.image.metadata}"
+        )
+        for language in languages:
+            caption = sample.captions.get(language)
+            if caption is None:
+                print(f"  - {language}: <missing>")
+                continue
+            print(
+                f"  - {language}: len={len(caption.text)} "
+                f"text=\"{_preview_text(caption.text)}\""
+            )
     
     
     # 内部就是一个 List[MultilingualExample]，每个 MultilingualExample 包含：

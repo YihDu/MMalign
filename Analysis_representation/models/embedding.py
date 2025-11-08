@@ -1,9 +1,9 @@
-"""Hidden-state extraction utilities built on top of LLaVA."""
+"""Post-fusion hidden-state extraction utilities for LLaVA."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -22,168 +22,466 @@ class MultilayerEmbedding:
 
 
 @dataclass
-class EmbeddingBatch:
-    """Grouped embeddings for images and multilingual captions."""
+class SequenceSpanInfo:
+    """Bookkeeping for fused sequences (per-sample spans and indices)."""
 
-    images: MultilayerEmbedding
-    captions: Dict[str, MultilayerEmbedding]
+    fused_lengths: List[int]
+    image_spans: List[Tuple[int, int]]  # [start, end) indices
+    text_last_indices: List[int]
+    num_image_tokens: int
+
+
+@dataclass
+class LanguageFusionEmbedding:
+    """Per-language representations derived from the fused LLM forward pass."""
+
+    text: MultilayerEmbedding  # h(text | image)
+    image: MultilayerEmbedding  # pooled image-span hidden states
+    text_only: MultilayerEmbedding  # h(text | ∅)
+    delta_text: MultilayerEmbedding  # Δh = text - text_only per layer
+    spans: SequenceSpanInfo
+
+
+@dataclass
+class EmbeddingBatch:
+    """Grouped fused embeddings keyed by language code."""
+
+    captions: Dict[str, LanguageFusionEmbedding]
+
+    @property
+    def languages(self) -> Dict[str, LanguageFusionEmbedding]:
+        return self.captions
+
+
+@dataclass
+class FusionConfig:
+    """Runtime knobs controlling prompt templates and pooling behaviors."""
+
+    prompt_with_image: str = "{image_token}\n{caption}"
+    prompt_text_only: str = "{caption}"
+    image_pooling: str = "mean"
+    keep_image_tokens: bool = False
+    delta_enabled: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object] | None) -> "FusionConfig":
+        if not data:
+            return cls()
+        prompt_with_image = str(data.get("prompt_with_image", cls.prompt_with_image))
+        prompt_text_only = str(data.get("prompt_text_only", cls.prompt_text_only))
+        image_pooling = str(data.get("image_pooling", cls.image_pooling))
+        keep_image_tokens = bool(data.get("keep_image_tokens", cls.keep_image_tokens))
+        delta_enabled = bool(data.get("delta_enabled", cls.delta_enabled))
+        return cls(
+            prompt_with_image=prompt_with_image,
+            prompt_text_only=prompt_text_only,
+            image_pooling=image_pooling,
+            keep_image_tokens=keep_image_tokens,
+            delta_enabled=delta_enabled,
+        )
+
+
+class PromptBuilder:
+    """Utility to standardise prompt construction for each caption."""
+
+    def __init__(self, with_image: str, text_only: str) -> None:
+        self._with_image = with_image
+        self._text_only = text_only
+
+    def build_with_image(self, caption: str) -> str:
+        prompt = self._with_image.format(
+            caption=caption.strip(),
+            image_token="<image>",
+        )
+        if prompt.count("<image>") != 1:
+            raise ValueError("Prompt with image must contain exactly one '<image>' token.")
+        return prompt
+
+    def build_text_only(self, caption: str) -> str:
+        return self._text_only.format(caption=caption.strip()).strip()
 
 
 def encode_examples(
     examples: Iterable[MultilingualExample],
     model,
     processor,
+    fusion_config: Mapping[str, object] | None = None,
 ) -> EmbeddingBatch:
-    """抽取批量样本的图像/文本多层 hidden state。
+    """Extract fused hidden states for each language with optional Δh vectors."""
 
-    步骤：
-    1. 将每个样本的图像统一转成 PIL，并按语言累积文本。
-    2. 调用图像/文本编码函数获取各自的 per-layer 表示。
-    3. 打包为 EmbeddingBatch，方便下游按语言读取。
-    """
+    config = FusionConfig.from_mapping(fusion_config)
+    prompt_builder = PromptBuilder(
+        with_image=config.prompt_with_image,
+        text_only=config.prompt_text_only,
+    )
 
     texts_by_language: dict[str, list[str]] = {}
     image_inputs: List[Image.Image] = []
     for example in examples:
-        # 统一将图像转成 RGB PIL，方便 processor 做预处理
         image_inputs.append(_ensure_pil(example.image.to_model_input()))
         for language, caption in example.captions.items():
-            # 多语言文本分别累计，保持与图像索引一致
             texts_by_language.setdefault(language, []).append(caption.text)
 
-    image_embeddings = _encode_images_multilayer(
+    if not image_inputs:
+        raise ValueError("No examples provided for encoding.")
+
+    tokenizer = _resolve_tokenizer(processor)
+    language_model = _resolve_language_model(model)
+    fallback_device = _model_device(model)
+    language_device, language_dtype = _module_device_dtype(
+        language_model,
+        fallback_device=fallback_device,
+    )
+
+    projected_image_tokens = _project_image_tokens(
         images=image_inputs,
         model=model,
         processor=processor,
     )
-    text_embeddings = {
-        language: _encode_texts_multilayer(texts, model, processor)
-        for language, texts in texts_by_language.items()
-    }
-    return EmbeddingBatch(images=image_embeddings, captions=text_embeddings)
+    projected_image_tokens = projected_image_tokens.to(
+        device=language_device,
+        dtype=language_dtype,
+        non_blocking=True,
+    )
 
-
-def _encode_images_multilayer(
-    images: Sequence[Image.Image],
-    model,
-    processor,
-    normalize: bool = True,
-) -> MultilayerEmbedding:
-    """按照 LLaVA 规范通过 vision tower 提取图像各层 hidden state。
-
-    步骤：
-    1. 利用 processor 生成符合模型要求的 pixel_values。
-    2. 将像素迁移到 vision tower 的设备/精度，并开启 output_hidden_states。
-    3. 对每层取 CLS patch，必要时做归一化，组成 MultilayerEmbedding。
-    """
-
-    fallback_device = _model_device(model)
-    # 官方接口：通过 get_vision_tower() 获取真正的 CLIPVisionModel
-    vision_tower = _resolve_vision_tower(model)
-    pixel_values = _prepare_pixel_values(images, processor)
-    device, dtype = _module_device_dtype(vision_tower, fallback_device=fallback_device)
-    pixel_values = pixel_values.to(device=device, dtype=dtype, non_blocking=True)
-    projector = _resolve_mm_projector(model)
-
-    with torch.no_grad():
-        outputs = vision_tower(
-            pixel_values=pixel_values,
-            output_hidden_states=True,
-            return_dict=True,
+    embeddings_by_language: Dict[str, LanguageFusionEmbedding] = {}
+    for language, texts in texts_by_language.items():
+        if len(texts) != len(image_inputs):
+            raise ValueError(
+                "Post-fusion analysis requires every sample to provide all languages; "
+                f"language '{language}' is missing {len(image_inputs) - len(texts)} captions."
+            )
+        language_embedding = _encode_language_fusion(
+            language=language,
+            captions=texts,
+            tokenizer=tokenizer,
+            language_model=language_model,
+            image_tokens=projected_image_tokens,
+            prompt_builder=prompt_builder,
+            config=config,
         )
+        embeddings_by_language[language] = language_embedding
 
-    hidden_states = _select_transformer_layers(outputs.hidden_states)
-    per_layer: List[np.ndarray] = []
-    for layer in hidden_states:
-        # 图像侧用 CLS patch（索引 0）代表整幅图
-        cls_tokens = layer[:, 0, :]
-        if projector is not None:
-            cls_tokens = projector(cls_tokens)
-        layer_np = cls_tokens.detach().cpu().float().numpy()
-        per_layer.append(_normalize(layer_np) if normalize else layer_np)
-
-    pooled = None
-    if getattr(outputs, "pooler_output", None) is not None:
-        pooled_np = outputs.pooler_output.detach().cpu().float().numpy()
-        pooled = _normalize(pooled_np) if normalize else pooled_np
-
-    return MultilayerEmbedding(per_layer=per_layer, pooled=pooled)
+    return EmbeddingBatch(captions=embeddings_by_language)
 
 
-def _encode_texts_multilayer(
-    texts: Sequence[str],
-    model,
-    processor,
-    normalize: bool = True,
-) -> MultilayerEmbedding:
-    """Extract multilayer hidden states from the language model branch."""
+def _encode_language_fusion(
+    *,
+    language: str,
+    captions: Sequence[str],
+    tokenizer,
+    language_model,
+    image_tokens: torch.Tensor,
+    prompt_builder: PromptBuilder,
+    config: FusionConfig,
+) -> LanguageFusionEmbedding:
+    label = language or "text"
+    print(
+        f"[debug][fusion:{label}] samples={len(captions)} "
+        f"prompt_with_image='{_truncate_text_preview(prompt_builder.build_with_image(captions[0]))}'"
+    )
 
-    if not texts:
-        raise ValueError("No texts provided for encoding.")
+    prompts_with_image = [prompt_builder.build_with_image(text) for text in captions]
+    prompts_text_only = [prompt_builder.build_text_only(text) for text in captions]
 
-    tokenizer = _resolve_tokenizer(processor)
-    tokenized = _tokenize_texts(tokenizer, texts)
-    language_model = _resolve_language_model(model)
-
-    fallback_device = _model_device(model)
-    device, _ = _module_device_dtype(language_model, fallback_device=fallback_device)
-
-    model_inputs: Dict[str, object] = {}
-    for key, value in tokenized.items():
-        if isinstance(value, torch.Tensor):
-            model_inputs[key] = value.to(device=device, non_blocking=True)
-        else:
-            model_inputs[key] = value
-
-    if "attention_mask" not in model_inputs:
-        input_ids = model_inputs.get("input_ids")
-        if not isinstance(input_ids, torch.Tensor):
-            raise ValueError("Tokenizer must provide attention_mask or input_ids tensors.")
-        model_inputs["attention_mask"] = torch.ones_like(input_ids, dtype=torch.long)
-
-    attention_mask = model_inputs["attention_mask"]
-    if not isinstance(attention_mask, torch.Tensor):
-        raise TypeError("attention_mask must be a torch.Tensor after preprocessing.")
+    fused_inputs, fused_mask, span_info = _build_fused_inputs(
+        prompts=prompts_with_image,
+        tokenizer=tokenizer,
+        language_model=language_model,
+        image_tokens=image_tokens,
+    )
 
     with torch.no_grad():
-        outputs = language_model(  # type: ignore[call-arg]
-            **model_inputs,
+        fused_outputs = language_model(  # type: ignore[call-arg]
+            inputs_embeds=fused_inputs,
+            attention_mask=fused_mask,
             output_hidden_states=True,
             use_cache=False,
             return_dict=True,
         )
 
-    hidden_states = _select_transformer_layers(outputs.hidden_states)
-    last_token_indices = _last_token_indices(attention_mask)
+    fused_hidden_layers = _select_transformer_layers(fused_outputs.hidden_states)
+    text_indices_tensor = torch.tensor(
+        span_info.text_last_indices,
+        device=fused_inputs.device,
+        dtype=torch.long,
+    )
+    text_layers = _gather_text_vectors(fused_hidden_layers, text_indices_tensor)
+    image_layers = _gather_image_vectors(
+        fused_hidden_layers,
+        span_info.image_spans,
+        span_info.num_image_tokens,
+        pooling=config.image_pooling,
+    )
 
+    text_only_layers: List[torch.Tensor] = []
+    delta_layers: List[torch.Tensor] = []
+    if config.delta_enabled:
+        text_only_inputs = _tokenize_texts(tokenizer, prompts_text_only)
+        text_only_inputs = _ensure_attention_mask(text_only_inputs)
+        text_only_inputs = _move_tensors(text_only_inputs, device=fused_inputs.device)
+
+        with torch.no_grad():
+            text_only_outputs = language_model(  # type: ignore[call-arg]
+                **text_only_inputs,
+                output_hidden_states=True,
+                use_cache=False,
+                return_dict=True,
+            )
+
+        text_only_hidden = _select_transformer_layers(text_only_outputs.hidden_states)
+        text_only_indices = _last_token_indices(text_only_inputs["attention_mask"])
+        text_only_layers = _gather_text_vectors(text_only_hidden, text_only_indices)
+        delta_layers = [a - b for a, b in zip(text_layers, text_only_layers, strict=False)]
+    else:
+        text_only_layers = []
+        delta_layers = []
+
+    text_embedding = _to_multilayer_embedding(text_layers, domain=f"text|image:{label}")
+    image_embedding = _to_multilayer_embedding(image_layers, domain=f"image:{label}")
+    text_only_embedding = _to_multilayer_embedding(text_only_layers, domain=f"text_only:{label}")
+    delta_embedding = _to_multilayer_embedding(delta_layers, domain=f"delta:{label}")
+
+    return LanguageFusionEmbedding(
+        text=text_embedding,
+        image=image_embedding,
+        text_only=text_only_embedding,
+        delta_text=delta_embedding,
+        spans=span_info,
+    )
+
+
+def _project_image_tokens(
+    images: Sequence[Image.Image],
+    model,
+    processor,
+) -> torch.Tensor:
+    fallback_device = _model_device(model)
+    vision_tower = _resolve_vision_tower(model)
+    projector = _resolve_mm_projector(model)
+    if projector is None:
+        raise AttributeError("Model does not expose a multimodal projector.")
+
+    pixel_values = _prepare_pixel_values(images, processor)
+    device, dtype = _module_device_dtype(vision_tower, fallback_device=fallback_device)
+    pixel_values = pixel_values.to(device=device, dtype=dtype, non_blocking=True)
+
+    with torch.no_grad():
+        outputs = vision_tower(
+            pixel_values=pixel_values,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+
+    last_hidden = getattr(outputs, "last_hidden_state", None)
+    if last_hidden is None:
+        raise ValueError("Vision tower did not return last_hidden_state.")
+    patch_tokens = last_hidden[:, 1:, :]  # drop CLS token
+    projected = projector(patch_tokens)
+    print(
+        f"[debug][image] batch={projected.shape[0]} patches={projected.shape[1]} hidden={projected.shape[2]}"
+    )
+    return projected.detach()
+
+
+def _build_fused_inputs(
+    *,
+    prompts: Sequence[str],
+    tokenizer,
+    language_model,
+    image_tokens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, SequenceSpanInfo]:
+    tokenized = _tokenize_texts(tokenizer, prompts)
+    tokenized = _ensure_attention_mask(tokenized)
+
+    input_ids = tokenized["input_ids"]
+    attention_mask = tokenized["attention_mask"]
+    if not isinstance(input_ids, torch.Tensor) or not isinstance(attention_mask, torch.Tensor):
+        raise TypeError("Tokenizer must return torch.Tensor inputs for fused prompts.")
+
+    embed_layer = language_model.get_input_embeddings()
+    token_embeds = embed_layer(input_ids.to(device=image_tokens.device))
+    attention_mask = attention_mask.to(device=image_tokens.device)
+
+    image_token_id = _resolve_image_token_id(tokenizer)
+    batch_size, seq_len = input_ids.shape
+    num_image_tokens = int(image_tokens.size(1))
+    fused_embeddings: List[torch.Tensor] = []
+    fused_masks: List[torch.Tensor] = []
+    fused_lengths: List[int] = []
+    image_spans: List[Tuple[int, int]] = []
+    text_last_indices: List[int] = []
+
+    for batch_idx in range(batch_size):
+        text_len = int(attention_mask[batch_idx].sum().item())
+        if text_len == 0:
+            raise ValueError("Prompt tokenization produced empty sequence.")
+        valid_ids = input_ids[batch_idx, :text_len]
+        valid_embeds = token_embeds[batch_idx, :text_len, :]
+        placeholder_positions = (valid_ids == image_token_id).nonzero(as_tuple=False)
+        if placeholder_positions.numel() != 1:
+            raise ValueError(
+                "Each prompt must contain exactly one '<image>' token that stays within the attention span."
+            )
+        placeholder_idx = int(placeholder_positions.item())
+        prefix = valid_embeds[:placeholder_idx]
+        suffix = valid_embeds[placeholder_idx + 1 :]
+
+        fused = torch.cat(
+            [prefix, image_tokens[batch_idx].to(valid_embeds.dtype), suffix],
+            dim=0,
+        )
+        fused_len = fused.size(0)
+        expected_len = text_len - 1 + num_image_tokens
+        if fused_len != expected_len:
+            raise ValueError(
+                f"Sequence length mismatch after fusion: expected {expected_len}, got {fused_len}."
+            )
+
+        fused_embeddings.append(fused)
+        mask = torch.zeros(fused_len, device=fused.device)
+        mask[:fused_len] = 1
+        fused_masks.append(mask)
+        fused_lengths.append(int(fused_len))
+
+        image_start = int(prefix.size(0))
+        image_end = image_start + num_image_tokens
+        image_spans.append((image_start, image_end))
+        if suffix.size(0) > 0:
+            last_text_idx = image_end + suffix.size(0) - 1
+        elif prefix.size(0) > 0:
+            last_text_idx = prefix.size(0) - 1
+        else:
+            raise ValueError("Prompt must include text tokens besides '<image>'.")
+        text_last_indices.append(int(last_text_idx))
+
+    max_fused_len = max(fused_lengths)
+    hidden_size = fused_embeddings[0].size(-1)
+    fused_batch = torch.zeros(
+        (batch_size, max_fused_len, hidden_size),
+        device=image_tokens.device,
+        dtype=fused_embeddings[0].dtype,
+    )
+    fused_mask_batch = torch.zeros(
+        (batch_size, max_fused_len),
+        device=image_tokens.device,
+        dtype=attention_mask.dtype,
+    )
+    for idx, fused in enumerate(fused_embeddings):
+        length = fused.size(0)
+        fused_batch[idx, :length, :] = fused
+        fused_mask_batch[idx, :length] = fused_masks[idx]
+
+    span_info = SequenceSpanInfo(
+        fused_lengths=fused_lengths,
+        image_spans=image_spans,
+        text_last_indices=text_last_indices,
+        num_image_tokens=num_image_tokens,
+    )
+    _validate_spans(span_info)
+    return fused_batch, fused_mask_batch, span_info
+
+
+def _gather_text_vectors(
+    hidden_layers: Sequence[torch.Tensor],
+    positions: torch.Tensor,
+) -> List[torch.Tensor]:
+    if not hidden_layers:
+        return []
+    if positions.ndim != 1:
+        positions = positions.view(-1)
+    batch_size = positions.size(0)
+    batch_indices = torch.arange(batch_size, device=positions.device)
+    gathered: List[torch.Tensor] = []
+    for layer in hidden_layers:
+        vectors = layer[batch_indices, positions, :]
+        gathered.append(vectors)
+    return gathered
+
+
+def _gather_image_vectors(
+    hidden_layers: Sequence[torch.Tensor],
+    spans: Sequence[Tuple[int, int]],
+    num_image_tokens: int,
+    pooling: str,
+) -> List[torch.Tensor]:
+    if not hidden_layers:
+        return []
+    pooled_layers: List[torch.Tensor] = []
+    for layer in hidden_layers:
+        pooled_vectors: List[torch.Tensor] = []
+        for batch_idx, (start, end) in enumerate(spans):
+            if end - start != num_image_tokens:
+                raise ValueError("Image span length mismatch detected.")
+            span_hidden = layer[batch_idx, start:end, :]
+            if pooling == "mean":
+                pooled = span_hidden.mean(dim=0)
+            else:
+                raise ValueError(f"Unsupported image_pooling '{pooling}'.")
+            pooled_vectors.append(pooled)
+        pooled_layers.append(torch.stack(pooled_vectors, dim=0))
+    return pooled_layers
+
+
+def _to_multilayer_embedding(
+    layer_tensors: Sequence[torch.Tensor],
+    *,
+    domain: str,
+) -> MultilayerEmbedding:
     per_layer: List[np.ndarray] = []
-    for layer in hidden_states:
-        if layer.ndim != 3:
-            raise ValueError("Language model hidden states must have shape [B, T, H].")
-        batch_size = layer.size(0)
-        if batch_size == 0:
-            continue
-        gather_indices = last_token_indices.to(layer.device)
-        batch_positions = torch.arange(batch_size, device=layer.device)
-        token_vectors = layer[batch_positions, gather_indices, :]
-        layer_np = token_vectors.detach().cpu().float().numpy()
-        per_layer.append(_normalize(layer_np) if normalize else layer_np)
-
+    for idx, tensor in enumerate(layer_tensors):
+        array = tensor.detach().to(dtype=torch.float32).cpu().numpy()
+        per_layer.append(array)
+        if idx in {0, len(layer_tensors) - 1}:
+            _debug_layer_stats(domain, f"layer_{idx:02d}", array)
     pooled = per_layer[-1] if per_layer else None
     return MultilayerEmbedding(per_layer=per_layer, pooled=pooled)
 
 
-def _prepare_pixel_values(images: Sequence[Image.Image], processor) -> torch.Tensor:
-    """使用 image_processor 做 resize/crop/normalize 并返回像素张量。
-    自动兼容单图像或多图像输入，输出标准 4D torch.Tensor [B, C, H, W]。
-    """
+def _resolve_image_token_id(tokenizer) -> int:
+    token_id = tokenizer.convert_tokens_to_ids("<image>")
+    if token_id is None or token_id == tokenizer.unk_token_id:
+        raise ValueError("Tokenizer does not contain a valid '<image>' token.")
+    return int(token_id)
 
+
+def _ensure_attention_mask(model_inputs: Mapping[str, object]) -> Mapping[str, object]:
+    if "attention_mask" in model_inputs:
+        return model_inputs
+    input_ids = model_inputs.get("input_ids")
+    if not isinstance(input_ids, torch.Tensor):
+        raise ValueError("Tokenizer outputs must include input_ids tensor when attention_mask is missing.")
+    model_inputs = dict(model_inputs)
+    model_inputs["attention_mask"] = torch.ones_like(input_ids, dtype=torch.long)
+    return model_inputs
+
+
+def _move_tensors(data: Mapping[str, object], *, device: torch.device) -> Mapping[str, object]:
+    moved: Dict[str, object] = {}
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor):
+            moved[key] = value.to(device=device, non_blocking=True)
+        else:
+            moved[key] = value
+    return moved
+
+
+def _validate_spans(span_info: SequenceSpanInfo) -> None:
+    for fused_len, (start, end) in zip(span_info.fused_lengths, span_info.image_spans, strict=False):
+        if end - start != span_info.num_image_tokens:
+            raise ValueError("Image span length mismatch detected during validation.")
+        if not (0 <= start < end <= fused_len):
+            raise ValueError("Image span indices fall outside the fused sequence.")
+    for fused_len, last_idx in zip(span_info.fused_lengths, span_info.text_last_indices, strict=False):
+        if not (0 <= last_idx < fused_len):
+            raise ValueError("Text last-token index is outside the fused sequence.")
+
+
+def _prepare_pixel_values(images: Sequence[Image.Image], processor) -> torch.Tensor:
     if not images:
         raise ValueError("No images provided for encoding.")
 
     image_processor = processor.image_processor
-
-    # 自动推断目标尺寸
     crop_size_dict = getattr(image_processor, "crop_size", None)
     if crop_size_dict and "height" in crop_size_dict and "width" in crop_size_dict:
         target_size = {"height": crop_size_dict["height"], "width": crop_size_dict["width"]}
@@ -196,47 +494,33 @@ def _prepare_pixel_values(images: Sequence[Image.Image], processor) -> torch.Ten
             target_size = {"height": 224, "width": 224}
 
     final_size = min(target_size.values())
-
-    # 构造处理参数
     kwargs = dict(
         do_resize=True,
         size={"shortest_edge": final_size},
-        resample=2,  # PIL.Image.BICUBIC
+        resample=2,
         do_center_crop=True,
         crop_size=target_size,
         do_rescale=True,
         do_normalize=True,
         do_convert_rgb=True,
-        return_tensors="np",  # 先输出 numpy，方便统一栈处理
+        return_tensors="np",
     )
 
     batch = image_processor(images=list(images), **kwargs)
-    
     pixel_values = batch["pixel_values"]
     pixel_values = np.array(pixel_values, copy=True)
-    
-    # 自动判断类型：可能是 np.ndarray 或 list[np.ndarray]
     if isinstance(pixel_values, np.ndarray):
         final_tensor = torch.from_numpy(pixel_values)
     elif isinstance(pixel_values, (list, tuple)):
-        # 处理为 list of np.ndarray -> stack
         final_tensor = torch.from_numpy(np.stack(pixel_values))
     else:
         raise TypeError(f"Unexpected pixel_values type: {type(pixel_values)}")
-
-    # 最终保证返回形状为 [B, C, H, W]
     if final_tensor.ndim == 3:
         final_tensor = final_tensor.unsqueeze(0)
-
     return final_tensor
 
 
 def _select_transformer_layers(hidden_states) -> List[torch.Tensor]:
-    """去除 embedding 层，仅保留 transformer block 输出。
-
-    步骤：若 hidden_states 长度>1，则跳过索引 0（embedding），返回其余层；否则直接返回原列表。
-    """
-
     if not hidden_states:
         return []
     if len(hidden_states) > 1:
@@ -244,22 +528,7 @@ def _select_transformer_layers(hidden_states) -> List[torch.Tensor]:
     return list(hidden_states)
 
 
-def _normalize(embeddings: np.ndarray) -> np.ndarray:
-    """对批量向量执行 L2 归一化并清理 NaN/Inf。
-
-    步骤：先用 nan_to_num 清理，再计算范数并裁剪，最后除以范数得到 unit 向量。
-    """
-
-    if not np.all(np.isfinite(embeddings)):
-        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=1e5, neginf=-1e5)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    clipped_norms = np.clip(norms, a_min=1e-12, a_max=None)
-    return embeddings / clipped_norms
-
-
 def _resolve_tokenizer(processor):
-    """Best-effort extraction of a tokenizer from the processor object."""
-
     for attr in ("tokenizer", "text_tokenizer"):
         tokenizer = getattr(processor, attr, None)
         if tokenizer is not None:
@@ -274,8 +543,6 @@ def _resolve_tokenizer(processor):
 
 
 def _tokenize_texts(tokenizer, texts: Sequence[str]):
-    """Tokenize texts with sensible defaults for multilayer extraction."""
-
     return tokenizer(  # type: ignore[call-arg]
         list(texts),
         padding=True,
@@ -285,8 +552,6 @@ def _tokenize_texts(tokenizer, texts: Sequence[str]):
 
 
 def _last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
-    """Compute the final valid token index for each sequence based on the mask."""
-
     if attention_mask.ndim != 2:
         raise ValueError("attention_mask must be 2D [batch, seq_len].")
     mask = attention_mask.to(dtype=torch.long)
@@ -295,8 +560,6 @@ def _last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
 
 
 def _ensure_pil(image) -> Image.Image:
-    """将任意图像输入安全转换为 RGB PIL。"""
-
     if isinstance(image, Image.Image):
         return image.convert("RGB")
     if isinstance(image, np.ndarray):
@@ -314,9 +577,29 @@ def _ensure_pil(image) -> Image.Image:
     return Image.fromarray(array).convert("RGB")
 
 
-def _resolve_vision_tower(model) -> nn.Module:
-    """解析 LLaVA 中的 vision tower（CLIPVisionModel）。"""
+def _truncate_text_preview(text: str, limit: int = 60) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
 
+
+def _debug_layer_stats(domain: str, label: str, vectors: np.ndarray) -> None:
+    if vectors.size == 0:
+        print(f"[debug][{domain}] {label}: empty vectors")
+        return
+    matrix = vectors if vectors.ndim == 2 else np.reshape(vectors, (1, -1))
+    norms = np.linalg.norm(matrix, axis=1)
+    first = matrix[0][: min(5, matrix.shape[1])]
+    preview = np.array2string(first, precision=3, separator=", ")
+    print(
+        f"[debug][{domain}] {label}: shape={matrix.shape} "
+        f"norm[min={norms.min():.3f} max={norms.max():.3f} mean={norms.mean():.3f}] "
+        f"first[:5]={preview}"
+    )
+
+
+def _resolve_vision_tower(model) -> nn.Module:
     tower = None
     if hasattr(model, "get_vision_tower"):
         tower = model.get_vision_tower()
@@ -328,7 +611,6 @@ def _resolve_vision_tower(model) -> nn.Module:
         tower = tower[0]
     if isinstance(tower, nn.ModuleList) and len(tower) > 0:
         tower = tower[0]
-    # unwrap common containers used by LLaVA
     for attr in ("vision_tower", "vision_model"):
         tower = getattr(tower, attr, tower)
     if not isinstance(tower, nn.Module):
@@ -337,8 +619,6 @@ def _resolve_vision_tower(model) -> nn.Module:
 
 
 def _resolve_language_model(model) -> nn.Module:
-    """解析 LLaVA 中的语言模型（LLaMA）。"""
-
     for attr in ("language_model", "model"):
         language_model = getattr(model, attr, None)
         if isinstance(language_model, nn.Module):
@@ -349,8 +629,6 @@ def _resolve_language_model(model) -> nn.Module:
 
 
 def _resolve_mm_projector(model) -> nn.Module | None:
-    """Locate the multimodal projector that maps vision tokens to text space."""
-
     def _probe(container) -> nn.Module | None:
         if container is None:
             return None
@@ -363,12 +641,10 @@ def _resolve_mm_projector(model) -> nn.Module | None:
     projector = _probe(model)
     if projector is not None:
         return projector
-
     core = getattr(model, "model", None)
     projector = _probe(core)
     if projector is not None:
         return projector
-
     get_model = getattr(model, "get_model", None)
     if callable(get_model):
         return _probe(get_model())
@@ -379,8 +655,6 @@ def _module_device_dtype(
     module: nn.Module,
     fallback_device=None,
 ) -> tuple[torch.device, torch.dtype]:
-    """返回模块参数所在的 device/dtype。"""
-
     try:
         first_param = next(module.parameters())
         return first_param.device, first_param.dtype
@@ -391,8 +665,6 @@ def _module_device_dtype(
 
 
 def _model_device(model) -> torch.device:
-    """推断顶层模型默认运行设备。"""
-
     device = getattr(model, "device", None)
     if isinstance(device, torch.device):
         return device
@@ -400,3 +672,11 @@ def _model_device(model) -> torch.device:
         return next(model.parameters()).device
     except StopIteration:
         return torch.device("cpu")
+
+
+def _normalize(embeddings: np.ndarray) -> np.ndarray:
+    if not np.all(np.isfinite(embeddings)):
+        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=1e5, neginf=-1e5)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    clipped_norms = np.clip(norms, a_min=1e-12, a_max=None)
+    return embeddings / clipped_norms

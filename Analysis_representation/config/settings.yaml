@@ -12,7 +12,7 @@ data:
     data_dir: /root/personal/datasets/COCO_multilingual/data
     splits:
       - val
-    caption_index: 0
+    caption_index: 2
     filter_empty_languages: true
 
 model:
@@ -28,6 +28,12 @@ analysis:
     - cosine_distance
   statistics:
     t_test: true
+  fusion:
+    prompt_with_image: "{image_token}\n{caption}"
+    prompt_text_only: "{caption}"
+    image_pooling: mean
+    keep_image_tokens: false
+    delta_enabled: true
 
 visualization:
   output_dir: report/figures

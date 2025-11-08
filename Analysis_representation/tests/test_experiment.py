@@ -1,7 +1,12 @@
 import numpy as np
 from data.schemas import CaptionSample, ImageSample, MultilingualExample, SampleBatch
 from experiment import build_conditions, run_experiment
-from models.embedding import EmbeddingBatch, MultilayerEmbedding
+from models.embedding import (
+    EmbeddingBatch,
+    LanguageFusionEmbedding,
+    MultilayerEmbedding,
+    SequenceSpanInfo,
+)
 
 
 class DummyModel:
@@ -66,8 +71,21 @@ def test_runner_produces_results(monkeypatch):
         count = len(example_list)
         per_layer = [np.zeros((count, 2))]
         embedding = MultilayerEmbedding(per_layer=per_layer, pooled=per_layer[-1])
-        captions = {"en": embedding, "zh": embedding}
-        return EmbeddingBatch(images=embedding, captions=captions)
+        span_info = SequenceSpanInfo(
+            fused_lengths=[2] * count,
+            image_spans=[(0, 1)] * count,
+            text_last_indices=[1] * count,
+            num_image_tokens=1,
+        )
+        language_embedding = LanguageFusionEmbedding(
+            text=embedding,
+            image=embedding,
+            text_only=embedding,
+            delta_text=embedding,
+            spans=span_info,
+        )
+        captions = {"en": language_embedding, "zh": language_embedding}
+        return EmbeddingBatch(captions=captions)
 
     monkeypatch.setattr("experiment.runner.encode_examples", fake_encode_examples)
 
@@ -78,6 +96,5 @@ def test_runner_produces_results(monkeypatch):
         conditions=conditions,
         languages=["en", "zh"],
     )
-    assert "baseline" in distance_map
     assert "correct" in distance_map
     assert "mismatched" in distance_map

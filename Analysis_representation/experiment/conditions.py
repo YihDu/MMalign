@@ -29,7 +29,7 @@ def build_conditions() -> Dict[str, ConditionBuilder]:
     """Return the baseline/correct/mismatched condition builders."""
 
     return {
-        "baseline": _identity,
+        # "baseline": _identity,
         "correct": _identity,
-        "mismatched": _mismatched,
+        "mismatched": _mismatched
     }

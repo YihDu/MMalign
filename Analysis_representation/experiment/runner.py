@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Dict, Mapping, Sequence, Tuple
 
 import numpy as np
@@ -35,27 +36,79 @@ def run_experiment(
     results: Dict[str, Dict[str, Sequence[float]]] = {}
     for name, builder in conditions.items():
         conditioned_examples = builder(batch.examples)
-        print('开始获取Embedding')
-        embeddings = encode_examples(conditioned_examples, model, processor)
-        image_layers = _select_layers(embeddings.images, layer_mode, layer_indices)
-        if not image_layers:
-            raise ValueError("Image encoder did not return any hidden states.")
+        print(
+            f"[debug][condition:{name}] examples={len(conditioned_examples)} "
+            f"layer_mode={layer_mode}"
+        )
+        _preview_condition_samples(name, conditioned_examples, languages)
+        print("开始获取Embedding")
+        fusion_overrides = analysis_config.get("fusion") if isinstance(analysis_config, Mapping) else None
+        embeddings = encode_examples(
+            conditioned_examples,
+            model,
+            processor,
+            fusion_config=fusion_overrides,
+        )
 
         distances: Dict[str, Sequence[float]] = {}
+        text_layers_by_language: Dict[str, Sequence[Tuple[str, np.ndarray]]] = {}
         for language in languages:
-            caption_embeddings = embeddings.captions[language]
-            text_layers = _select_layers(caption_embeddings, layer_mode, layer_indices)
-            layer_pairs = _pair_layers(image_layers, text_layers)
+            language_embeddings = embeddings.captions.get(language)
+            if language_embeddings is None:
+                continue
+            text_layers = _select_layers(language_embeddings.text, layer_mode, layer_indices)
+            image_layers = _select_layers(language_embeddings.image, layer_mode, layer_indices)
+            if not text_layers or not image_layers:
+                continue
+            text_layers_by_language[language] = text_layers
+
+        for language, text_layers in text_layers_by_language.items():
+            language_embeddings = embeddings.captions.get(language)
+            if language_embeddings is None:
+                continue
+            image_layers = _select_layers(language_embeddings.image, layer_mode, layer_indices)
+            layer_pairs = _pair_layers(text_layers, image_layers)
             if not layer_pairs:
                 continue
             for layer_label, text_vectors, image_vectors in layer_pairs:
                 dist = cosine_distance_matrix(text_vectors, image_vectors)
-                diag = [
-                    float(dist[i, i])
-                    for i in range(min(dist.shape[0], dist.shape[1]))
-                ]
-                metric_name = f"cosine_{language}_{layer_label}"
+                diag = _diagonal(dist)
+                metric_name = f"cosine_image_text_{language}_{layer_label}"
                 distances[metric_name] = diag
+                _print_distance_stats(
+                    condition=name,
+                    metric=metric_name,
+                    values=diag,
+                    extra=f"shape={dist.shape}",
+                )
+
+            _record_delta_metrics(
+                distances=distances,
+                condition=name,
+                language=language,
+                text_layers=_select_layers(language_embeddings.text, layer_mode, layer_indices),
+                text_only_layers=_select_layers(language_embeddings.text_only, layer_mode, layer_indices),
+                delta_layers=_select_layers(language_embeddings.delta_text, layer_mode, layer_indices),
+            )
+
+        for lang_a, lang_b in combinations(sorted(text_layers_by_language.keys()), 2):
+            layers_a = text_layers_by_language[lang_a]
+            layers_b = text_layers_by_language[lang_b]
+            layer_pairs = _pair_layers(layers_a, layers_b)
+            if not layer_pairs:
+                continue
+            for layer_label, text_vectors_a, text_vectors_b in layer_pairs:
+                dist = cosine_distance_matrix(text_vectors_a, text_vectors_b)
+                diag = _diagonal(dist)
+                metric_name = f"cosine_{lang_a}__vs__{lang_b}_{layer_label}"
+                distances[metric_name] = diag
+                _print_distance_stats(
+                    condition=name,
+                    metric=metric_name,
+                    values=diag,
+                    extra=f"shape={dist.shape}",
+                )
+
         results[name] = distances
     return results
 
@@ -104,24 +157,133 @@ def _select_layers(
     return [(f"layer_{idx:02d}", layer) for idx, layer in selected]
 
 
+def _diagonal(distances: np.ndarray) -> Sequence[float]:
+    limit = min(distances.shape[0], distances.shape[1])
+    return [float(distances[i, i]) for i in range(limit)]
+
+
 def _pair_layers(
-    image_layers: Sequence[Tuple[str, np.ndarray]],
-    text_layers: Sequence[Tuple[str, np.ndarray]],
+    layers_a: Sequence[Tuple[str, np.ndarray]],
+    layers_b: Sequence[Tuple[str, np.ndarray]],
 ) -> Sequence[Tuple[str, np.ndarray, np.ndarray]]:
-    if not image_layers or not text_layers:
+    if not layers_a or not layers_b:
         return []
 
-    count = min(len(image_layers), len(text_layers))
-    if len(image_layers) != len(text_layers):
+    count = min(len(layers_a), len(layers_b))
+    if len(layers_a) != len(layers_b):
         print(
-            "[warn] Image/Text layer counts differ: "
-            f"image={len(image_layers)} text={len(text_layers)}; truncating to {count}."
+            "[warn] Layer counts differ: "
+            f"a={len(layers_a)} b={len(layers_b)}; truncating to {count}."
         )
 
     paired = []
     for idx in range(count):
-        img_label, img_vectors = image_layers[idx]
-        text_label, text_vectors = text_layers[idx]
-        layer_label = text_label if text_label == img_label else f"{text_label}__img_{img_label}"
-        paired.append((layer_label, text_vectors, img_vectors))
+        label_a, vectors_a = layers_a[idx]
+        label_b, vectors_b = layers_b[idx]
+        layer_label = label_a if label_a == label_b else f"{label_a}__vs__{label_b}"
+        paired.append((layer_label, vectors_a, vectors_b))
     return paired
+
+
+def _record_delta_metrics(
+    *,
+    distances: Dict[str, Sequence[float]],
+    condition: str,
+    language: str,
+    text_layers: Sequence[Tuple[str, np.ndarray]],
+    text_only_layers: Sequence[Tuple[str, np.ndarray]],
+    delta_layers: Sequence[Tuple[str, np.ndarray]],
+) -> None:
+    if not delta_layers or not text_layers or not text_only_layers:
+        return
+
+    layer_map = {label: vectors for label, vectors in text_layers}
+    text_only_map = {label: vectors for label, vectors in text_only_layers}
+    for label, delta_vectors in delta_layers:
+        base = layer_map.get(label)
+        text_only = text_only_map.get(label)
+        if base is None or text_only is None:
+            continue
+        l2_norms = _vector_norms(delta_vectors)
+        metric_l2 = f"delta_h_l2_{language}_{label}"
+        distances[metric_l2] = l2_norms
+        _print_distance_stats(
+            condition=condition,
+            metric=metric_l2,
+            values=l2_norms,
+            extra="l2",
+        )
+        cosine = _cosine_similarity_per_sample(base, text_only)
+        metric_cos = f"delta_h_cos_{language}_{label}"
+        distances[metric_cos] = cosine
+        _print_distance_stats(
+            condition=condition,
+            metric=metric_cos,
+            values=cosine,
+            extra="cos",
+        )
+
+
+def _vector_norms(matrix: np.ndarray) -> Sequence[float]:
+    norms = np.linalg.norm(matrix, axis=1)
+    return norms.tolist()
+
+
+def _cosine_similarity_per_sample(
+    matrix_a: np.ndarray,
+    matrix_b: np.ndarray,
+) -> Sequence[float]:
+    if matrix_a.shape != matrix_b.shape:
+        limit = min(len(matrix_a), len(matrix_b))
+        matrix_a = matrix_a[:limit]
+        matrix_b = matrix_b[:limit]
+    numerator = np.sum(matrix_a * matrix_b, axis=1)
+    denom = np.linalg.norm(matrix_a, axis=1) * np.linalg.norm(matrix_b, axis=1)
+    denom = np.clip(denom, a_min=1e-12, a_max=None)
+    cosine = numerator / denom
+    return cosine.tolist()
+
+
+def _preview_condition_samples(
+    condition: str,
+    examples,
+    languages: Sequence[str],
+    limit: int = 2,
+) -> None:
+    if not examples:
+        print(f"[debug][condition:{condition}] 无样本可预览")
+        return
+    for idx, example in enumerate(examples[:limit]):
+        image_id = example.image.image_id
+        filename = example.image.filename or "N/A"
+        print(
+            f"[debug][condition:{condition}] sample#{idx} image_id={image_id} filename={filename}"
+        )
+        for language in languages:
+            caption = example.captions.get(language)
+            if caption is None:
+                print(f"  - {language}: <缺失>")
+                continue
+            text = caption.text
+            preview = text if len(text) <= 50 else text[:47] + "..."
+            print(f"  - {language}: len={len(text)} text=\"{preview}\"")
+
+
+def _print_distance_stats(
+    *,
+    condition: str,
+    metric: str,
+    values: Sequence[float],
+    extra: str,
+) -> None:
+    if not values:
+        print(f"[debug][metric] condition={condition} metric={metric} 无有效值")
+        return
+    arr = np.array(values, dtype=float)
+    first_vals = ", ".join(f"{val:.3f}" for val in arr[:5])
+    print(
+        "[debug][metric] "
+        f"condition={condition} metric={metric} "
+        f"min={arr.min():.3f} mean={arr.mean():.3f} max={arr.max():.3f} "
+        f"first={first_vals} {extra}"
+    )
