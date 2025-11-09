@@ -81,6 +81,7 @@ def run_pipeline(config_path: Path, summary_path: Path, debug_csv_path: Path | N
         limit=config["experiment"].get("sample_size", 32),
         languages=languages,
     )
+    micro_batch_size = int(config["experiment"].get("batch_size", 8))
     print("构建 batch 完毕")
     print("------------------------")
 
@@ -119,6 +120,7 @@ def run_pipeline(config_path: Path, summary_path: Path, debug_csv_path: Path | N
         languages=languages,
         analysis_config=config.get("analysis", {}),
         debug_csv_path=debug_csv_path,
+        micro_batch_size=micro_batch_size,
     )
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)

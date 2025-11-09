@@ -27,6 +27,7 @@ def run_experiment(
     conditions: Mapping[str, ConditionBuilder],
     analysis_config: Mapping[str, object] | None = None,
     debug_csv_path: Path | None = None,
+    micro_batch_size: int | None = None,
 ) -> Dict[str, Dict[str, Sequence[float]]]:
     """Return cosine distance lists for each condition/language/layer."""
 
@@ -51,6 +52,7 @@ def run_experiment(
             model,
             processor,
             fusion_config=fusion_overrides,
+            micro_batch_size=micro_batch_size,
         )
 
         distances: Dict[str, Sequence[float]] = {}

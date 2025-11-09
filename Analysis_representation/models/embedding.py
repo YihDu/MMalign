@@ -74,6 +74,7 @@ def encode_examples(
     model,
     processor,
     fusion_config: Mapping[str, object] | None = None,
+    micro_batch_size: int | None = None,
 ) -> EmbeddingBatch:
     config = SimpleEmbeddingConfig.from_mapping(fusion_config)
 
@@ -97,6 +98,8 @@ def encode_examples(
 
     # get text embedding
     embeddings: Dict[str, LanguageEmbedding] = {}
+    batch_targets = list(range(len(images)))
+    chunk_size = micro_batch_size or len(images)
     with torch.inference_mode():
         for language, texts in texts_by_language.items():
             if len(texts) != len(images):
@@ -104,60 +107,66 @@ def encode_examples(
                     "Every image must provide a caption for all languages; "
                     f"language '{language}' is missing {len(images) - len(texts)} captions."
                 )
-            processor_inputs = processor(  # type: ignore[call-arg]
-                text=list(texts),
-                images=images,
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-            )
-            processor_inputs = _ensure_attention_mask(processor_inputs)
-            processor_inputs = _move_tensors(processor_inputs, device=device, dtype=dtype)
-            input_ids = processor_inputs.get("input_ids")
-            if not isinstance(input_ids, torch.Tensor):
-                raise ValueError("Processor outputs must include input_ids.")
-            attention_mask = processor_inputs.get("attention_mask")
-            if not isinstance(attention_mask, torch.Tensor):
-                raise ValueError("Processor outputs must include attention_mask.")
-            expanded_positions = _expanded_token_positions(
-                input_ids,
-                image_token_id=image_token_id,
-                num_image_patches=num_image_patches,
-                pad_token_id=pad_token_id,
-            )
-            last_token_positions = _last_token_positions(attention_mask, expanded_positions)
-            image_token_starts = _image_token_starts(
-                input_ids,
-                expanded_positions,
-                image_token_id=image_token_id,
-                num_image_patches=num_image_patches,
-            )
-            outputs = model(  # type: ignore[call-arg]
-                **processor_inputs,
-                output_hidden_states=True,
-                use_cache=False,
-                return_dict=True,
-            )
-            hidden_states = _extract_hidden_states(outputs)
-            image_layers = _image_token_layers(
-                hidden_states,
-                image_token_starts,
-                span_length=num_image_patches,
-                pooling=image_pooling,
-            )
-            text_layers = _gather_token_layers(hidden_states, last_token_positions)
-            if image_layers and text_layers:
-                sample_idx = 0
-                max_layers = min(4, len(text_layers))
-                for layer_idx in range(max_layers):
-                    text_norm = float(text_layers[layer_idx][sample_idx].norm().item())
-                    image_norm = float(image_layers[layer_idx][sample_idx].norm().item())
-                    print(
-                        f"[debug][embedding] lang={language} layer_{layer_idx:02d} "
-                        f"text_norm={text_norm:.4f} image_norm={image_norm:.4f}"
-                    )
-            text_embedding = _to_multilayer_embedding(text_layers, domain=f"text:{language}")
-            image_embedding = _to_multilayer_embedding(image_layers, domain=f"image:{language}")
+            text_layers_accum: List[List[torch.Tensor]] = []
+            image_layers_accum: List[List[torch.Tensor]] = []
+            for start in range(0, len(batch_targets), chunk_size):
+                end = start + chunk_size
+                idx_range = batch_targets[start:end]
+                chunk_images = [images[idx] for idx in idx_range]
+                chunk_texts = [texts[idx] for idx in idx_range]
+                processor_inputs = processor(  # type: ignore[call-arg]
+                    text=list(chunk_texts),
+                    images=chunk_images,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                processor_inputs = _ensure_attention_mask(processor_inputs)
+                processor_inputs = _move_tensors(processor_inputs, device=device, dtype=dtype)
+                input_ids = processor_inputs.get("input_ids")
+                if not isinstance(input_ids, torch.Tensor):
+                    raise ValueError("Processor outputs must include input_ids.")
+                attention_mask = processor_inputs.get("attention_mask")
+                if not isinstance(attention_mask, torch.Tensor):
+                    raise ValueError("Processor outputs must include attention_mask.")
+                expanded_positions = _expanded_token_positions(
+                    input_ids,
+                    image_token_id=image_token_id,
+                    num_image_patches=num_image_patches,
+                    pad_token_id=pad_token_id,
+                )
+                last_token_positions = _last_token_positions(attention_mask, expanded_positions)
+                image_token_starts = _image_token_starts(
+                    input_ids,
+                    expanded_positions,
+                    image_token_id=image_token_id,
+                    num_image_patches=num_image_patches,
+                )
+                outputs = model(  # type: ignore[call-arg]
+                    **processor_inputs,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+                hidden_states = _extract_hidden_states(outputs)
+                image_layers = _image_token_layers(
+                    hidden_states,
+                    image_token_starts,
+                    span_length=num_image_patches,
+                    pooling=image_pooling,
+                )
+                text_layers = _gather_token_layers(hidden_states, last_token_positions)
+                if not text_layers or not image_layers:
+                    continue
+                text_layers_accum.append(text_layers)
+                image_layers_accum.append(image_layers)
+
+            if not text_layers_accum or not image_layers_accum:
+                raise ValueError(f"No embeddings collected for language '{language}'.")
+            concatenated_text = _concat_layer_chunks(text_layers_accum)
+            concatenated_image = _concat_layer_chunks(image_layers_accum)
+            text_embedding = _to_multilayer_embedding(concatenated_text, domain=f"text:{language}")
+            image_embedding = _to_multilayer_embedding(concatenated_image, domain=f"image:{language}")
             embeddings[language] = LanguageEmbedding(text=text_embedding, image=image_embedding)
 
     return EmbeddingBatch(captions=embeddings)
@@ -170,6 +179,14 @@ def _gather_token_layers(hidden_states, indices: torch.Tensor) -> List[torch.Ten
     for layer in usable:
         gathered.append(layer[batch, indices, :])
     return gathered
+
+
+def _concat_layer_chunks(chunks: List[List[torch.Tensor]]) -> List[torch.Tensor]:
+    layers = len(chunks[0])
+    concatenated: List[torch.Tensor] = []
+    for layer_idx in range(layers):
+        concatenated.append(torch.cat([chunk[layer_idx] for chunk in chunks], dim=0))
+    return concatenated
 
 
 def _image_token_layers(
