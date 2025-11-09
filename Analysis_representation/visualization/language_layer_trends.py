@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Layer/condition plots for language↔image 与 语言↔语言指标，附带更丰富统计。"""
+"""Layer/condition plots for language↔image and language↔language metrics."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Sequence
+from typing import Dict, Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,70 +38,93 @@ LanguageImageStats = Dict[str, Dict[str, Dict[str, MetricSummary]]]
 LanguagePairStats = Dict[str, Dict[str, Dict[str, MetricSummary]]]
 
 DEFAULT_BASE_CONDITION = "correct"
+HIGHLIGHT_COLORS = {
+    "correct": "#1f77b4",  # deep blue
+    "mismatched": "#d62728",  # strong red
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "从 distance_map JSON 生成两套图："
-            "语言↔图像 与 语言↔语言 层趋势，并标注 mean/std/margin/win-rate。"
+            "Generate per-layer plots for language↔image and language↔language metrics "
+            "from the distance_map JSON or debug CSV."
         )
     )
     parser.add_argument(
         "--results",
         type=Path,
-        required=True,
-        help="run_experiment 生成的 distance_map JSON。",
+        default=None,
+        help="distance_map JSON dumped by run_experiment. Optional if --csv is provided.",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="Optional: plot directly from results/debug_metrics.csv.",
     )
     parser.add_argument(
         "--output",
         type=Path,
         required=True,
-        help="输出文件前缀；若提供 .png/.pdf 后缀会自动派生 *_lang_image 与 *_language_pairs。",
+        help="Output path prefix; suffixes are added when multiple sections are plotted.",
+    )
+    parser.add_argument(
+        "--section",
+        choices=["image", "language_pairs", "both"],
+        default="image",
+        help="Which metric family to plot (default: image).",
     )
     parser.add_argument(
         "--title",
         type=str,
         default=None,
-        help="可选全局标题（默认使用 results 文件名）。",
+        help="Optional title (defaults to the results filename).",
     )
     parser.add_argument(
         "--base-condition",
         type=str,
         default=DEFAULT_BASE_CONDITION,
-        help="用于 margin / win-rate 参考的条件（默认 correct）。",
+        help="Condition used as baseline for summaries (default: correct).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    distance_map = _load_distance_map(args.results)
-    language_image = _group_language_image(distance_map)
-    language_pairs = _group_language_pairs(distance_map)
+    if args.csv is not None:
+        language_image, language_pairs = _group_from_csv(args.csv)
+        base_title = args.title or args.csv.stem
+    else:
+        if args.results is None:
+            raise SystemExit("Either --results or --csv must be provided.")
+        distance_map = _load_distance_map(args.results)
+        language_image = _group_language_image(distance_map)
+        language_pairs = _group_language_pairs(distance_map)
+        base_title = args.title or args.results.stem
 
     if not language_image and not language_pairs:
-        raise SystemExit("未找到 cosine_image_text_* 或 cosine_*__vs__* 指标。")
+        raise SystemExit("No metrics found in the provided JSON/CSV.")
 
-    base_title = args.title or args.results.stem
-    if language_image:
-        output_path = _derive_output(args.output, suffix="_lang_image")
+    selected_sections = []
+    if args.section in {"image", "both"} and language_image:
+        suffix = "_lang_image" if args.section == "both" else ""
+        selected_sections.append((language_image, "Language ↔ Image", suffix))
+    if args.section in {"language_pairs", "both"} and language_pairs:
+        suffix = "_language_pairs" if args.section == "both" else ""
+        selected_sections.append((language_pairs, "Language ↔ Language", suffix))
+
+    if not selected_sections:
+        raise SystemExit("Requested section is unavailable in the input metrics.")
+
+    for stats, label, suffix in selected_sections:
+        output_path = args.output if not suffix else _derive_output(args.output, suffix=suffix)
         plot_language_category(
-            stats=language_image,
-            title=f"{base_title} · 语言↔图像",
+            stats=stats,
+            title=f"{base_title} · {label}",
             output_path=output_path,
             base_condition=args.base_condition,
-            section_label="语言-图像",
-        )
-
-    if language_pairs:
-        output_path = _derive_output(args.output, suffix="_language_pairs")
-        plot_language_category(
-            stats=language_pairs,
-            title=f"{base_title} · 语言↔语言",
-            output_path=output_path,
-            base_condition=args.base_condition,
-            section_label="多语言",
+            section_label=label,
         )
 
 
@@ -135,6 +159,32 @@ def _group_language_pairs(distance_map: MetricMap) -> LanguagePairStats:
             pair_label = f"{lang_a} ↔ {lang_b}"
             grouped.setdefault(pair_label, {}).setdefault(condition, {})[label] = _summarize(values)
     return grouped
+
+
+def _group_from_csv(path: Path) -> Tuple[LanguageImageStats, LanguagePairStats]:
+    image_group: LanguageImageStats = {}
+    pair_group: LanguagePairStats = {}
+    if not path.exists():
+        raise SystemExit(f"CSV 不存在：{path}")
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            metric_type = row.get("metric_type")
+            condition = row.get("condition") or "unknown"
+            language = row.get("language") or ""
+            layer = row.get("layer") or ""
+            summary = MetricSummary(
+                mean=float(row.get("diag_mean") or float("nan")),
+                std=float(row.get("diag_std") or float("nan")),
+                median=float(row.get("diag_mean") or float("nan")),
+                values=np.array([], dtype=float),
+            )
+            if metric_type == "image_text":
+                image_group.setdefault(language, {}).setdefault(condition, {})[layer] = summary
+            elif metric_type == "language_pair":
+                display_lang = language.replace("__vs__", " ↔ ")
+                pair_group.setdefault(display_lang, {}).setdefault(condition, {})[layer] = summary
+    return image_group, pair_group
 
 
 def _summarize(values: Sequence[float]) -> MetricSummary:
@@ -303,9 +353,17 @@ def _collect_conditions(
 def _build_condition_colors(conditions: Sequence[str]) -> Mapping[str, str]:
     if not conditions:
         return {}
-    cmap = plt.get_cmap("tab10")
-    denom = max(1, len(conditions) - 1)
-    return {condition: cmap(idx / denom) for idx, condition in enumerate(conditions)}
+    colors: Dict[str, str] = {}
+    remaining = [c for c in conditions if c not in HIGHLIGHT_COLORS]
+    for condition in conditions:
+        if condition in HIGHLIGHT_COLORS:
+            colors[condition] = HIGHLIGHT_COLORS[condition]
+    if remaining:
+        cmap = plt.get_cmap("tab10")
+        denom = max(1, len(remaining) - 1)
+        for idx, condition in enumerate(remaining):
+            colors[condition] = cmap(idx / denom)
+    return colors
 
 
 def _apply_panel_style(ax: plt.Axes) -> None:

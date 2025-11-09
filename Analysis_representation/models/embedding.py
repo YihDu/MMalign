@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -35,15 +35,20 @@ class SimpleEmbeddingConfig:
     image_prompt: str = "{image_token}"
     text_prefix: str = ""
     text_suffix: str = ""
+    image_pooling: str = "mean"
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object] | None) -> "SimpleEmbeddingConfig":
         if not data:
             return cls()
+        pooling = str(data.get("image_pooling", cls.image_pooling)).strip().lower()
+        if pooling not in {"mean", "first"}:
+            raise ValueError("image_pooling must be one of {'mean', 'first'}.")
         return cls(
             image_prompt=str(data.get("image_prompt", cls.image_prompt)),
             text_prefix=str(data.get("text_prefix", cls.text_prefix)),
             text_suffix=str(data.get("text_suffix", cls.text_suffix)),
+            image_pooling=pooling,
         )
 
     def build_image_prompt(self) -> str:
@@ -55,6 +60,14 @@ class SimpleEmbeddingConfig:
     def build_text(self, caption: str) -> str:
         return f"{self.text_prefix}{caption.strip()}{self.text_suffix}".strip()
 
+    def build_joint_prompt(self, caption: str) -> str:
+        """Compose the final prompt that pairs <image> with the caption text."""
+        prompt = self.build_image_prompt()
+        text = self.build_text(caption)
+        if text:
+            return f"{prompt}\n{text}".strip()
+        return prompt
+
 
 def encode_examples(
     examples: Iterable[MultilingualExample],
@@ -63,14 +76,13 @@ def encode_examples(
     fusion_config: Mapping[str, object] | None = None,
 ) -> EmbeddingBatch:
     config = SimpleEmbeddingConfig.from_mapping(fusion_config)
-    image_prompt = config.build_image_prompt()
 
     images: List[Image.Image] = []
     texts_by_language: Dict[str, List[str]] = {}
     for example in examples:
         images.append(_ensure_pil(example.image.to_model_input()))
         for language, caption in example.captions.items():
-            texts_by_language.setdefault(language, []).append(config.build_text(caption.text))
+            texts_by_language.setdefault(language, []).append(config.build_joint_prompt(caption.text))
 
     if not images:
         raise ValueError("No examples provided for encoding.")
@@ -78,17 +90,10 @@ def encode_examples(
     language_model = _resolve_language_model(model)
     tokenizer = _resolve_tokenizer(processor)
     device, dtype = _module_device_dtype(language_model, fallback_device=_model_device(model))
-
-
-    # get image embedding
-    image_embedding = _encode_image_hidden_states(
-        images=images,
-        prompt=image_prompt,
-        processor=processor,
-        language_model=language_model,
-        device=device,
-        dtype=dtype,
-    )
+    image_token_id = _resolve_image_token_id(tokenizer)
+    pad_token_id = _resolve_pad_token_id(tokenizer, model)
+    num_image_patches = _infer_num_image_patches(model)
+    image_pooling = config.image_pooling
 
     # get text embedding
     embeddings: Dict[str, LanguageEmbedding] = {}
@@ -99,62 +104,66 @@ def encode_examples(
                     "Every image must provide a caption for all languages; "
                     f"language '{language}' is missing {len(images) - len(texts)} captions."
                 )
-            tokenized = tokenizer(  # type: ignore[call-arg]
-                list(texts),
+            processor_inputs = processor(  # type: ignore[call-arg]
+                text=list(texts),
+                images=images,
                 padding=True,
                 truncation=True,
                 return_tensors="pt",
             )
-            tokenized = _ensure_attention_mask(tokenized)
-            tokenized = _move_tensors(tokenized, device=device)
-            outputs = language_model(  # type: ignore[call-arg]
-                **tokenized,
+            processor_inputs = _ensure_attention_mask(processor_inputs)
+            processor_inputs = _move_tensors(processor_inputs, device=device, dtype=dtype)
+            input_ids = processor_inputs.get("input_ids")
+            if not isinstance(input_ids, torch.Tensor):
+                raise ValueError("Processor outputs must include input_ids.")
+            attention_mask = processor_inputs.get("attention_mask")
+            if not isinstance(attention_mask, torch.Tensor):
+                raise ValueError("Processor outputs must include attention_mask.")
+            expanded_positions = _expanded_token_positions(
+                input_ids,
+                image_token_id=image_token_id,
+                num_image_patches=num_image_patches,
+                pad_token_id=pad_token_id,
+            )
+            last_token_positions = _last_token_positions(attention_mask, expanded_positions)
+            image_token_starts = _image_token_starts(
+                input_ids,
+                expanded_positions,
+                image_token_id=image_token_id,
+                num_image_patches=num_image_patches,
+            )
+            outputs = model(  # type: ignore[call-arg]
+                **processor_inputs,
                 output_hidden_states=True,
                 use_cache=False,
                 return_dict=True,
             )
-            text_layers = _last_token_layers(outputs.hidden_states, tokenized["attention_mask"])
+            hidden_states = _extract_hidden_states(outputs)
+            image_layers = _image_token_layers(
+                hidden_states,
+                image_token_starts,
+                span_length=num_image_patches,
+                pooling=image_pooling,
+            )
+            text_layers = _gather_token_layers(hidden_states, last_token_positions)
+            if image_layers and text_layers:
+                sample_idx = 0
+                max_layers = min(4, len(text_layers))
+                for layer_idx in range(max_layers):
+                    text_norm = float(text_layers[layer_idx][sample_idx].norm().item())
+                    image_norm = float(image_layers[layer_idx][sample_idx].norm().item())
+                    print(
+                        f"[debug][embedding] lang={language} layer_{layer_idx:02d} "
+                        f"text_norm={text_norm:.4f} image_norm={image_norm:.4f}"
+                    )
             text_embedding = _to_multilayer_embedding(text_layers, domain=f"text:{language}")
+            image_embedding = _to_multilayer_embedding(image_layers, domain=f"image:{language}")
             embeddings[language] = LanguageEmbedding(text=text_embedding, image=image_embedding)
 
     return EmbeddingBatch(captions=embeddings)
 
 
-def _encode_image_hidden_states(
-    *,
-    images: List[Image.Image],
-    prompt: str,
-    processor,
-    language_model: nn.Module,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> MultilayerEmbedding:
-    processor_inputs = processor(  # type: ignore[call-arg]
-        text=[prompt] * len(images), # 为每张图像生成一个相同的文本提示（prompt），这个提示通常用于告诉模型“这是一张图像”，如<image>。
-        images=images,
-        padding=True,
-        truncation=True,
-        return_tensors="pt",
-    )
-    processor_inputs = _move_tensors(processor_inputs, device=device, dtype=dtype)
-    attention_mask = processor_inputs.get("attention_mask")
-    if attention_mask is None:
-        raise ValueError("Processor outputs must include attention_mask.")
-    with torch.inference_mode():
-        outputs = language_model(  # type: ignore[call-arg]
-            **processor_inputs,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-        )
-    image_layers = _last_token_layers(outputs.hidden_states, attention_mask)
-    return _to_multilayer_embedding(image_layers, domain="image")
-
-
-def _last_token_layers(hidden_states, attention_mask: torch.Tensor) -> List[torch.Tensor]:
-    if not hidden_states:
-        return []
-    indices = _last_token_indices(attention_mask)
+def _gather_token_layers(hidden_states, indices: torch.Tensor) -> List[torch.Tensor]:
     batch = torch.arange(indices.size(0), device=indices.device)
     usable = hidden_states[1:] if len(hidden_states) > 1 else hidden_states
     gathered: List[torch.Tensor] = []
@@ -163,12 +172,41 @@ def _last_token_layers(hidden_states, attention_mask: torch.Tensor) -> List[torc
     return gathered
 
 
-def _last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
-    if attention_mask.ndim != 2:
-        raise ValueError("attention_mask must be 2D [batch, seq_len].")
-    mask = attention_mask.to(dtype=torch.long)
-    lengths = mask.sum(dim=1) - 1
-    return torch.clamp(lengths, min=0)
+def _image_token_layers(
+    hidden_states,
+    start_indices: torch.Tensor,
+    *,
+    span_length: int,
+    pooling: str,
+) -> List[torch.Tensor]:
+    if not hidden_states:
+        return []
+    if span_length <= 0:
+        raise ValueError("span_length for image tokens must be positive.")
+    usable = hidden_states[1:] if len(hidden_states) > 1 else hidden_states
+    gathered: List[torch.Tensor] = []
+    for layer in usable:
+        vectors: List[torch.Tensor] = []
+        for batch_idx in range(start_indices.size(0)):
+            start = int(start_indices[batch_idx].item())
+            end = start + span_length
+            token_span = layer[batch_idx, start:end, :]
+            if token_span.shape[0] != span_length:
+                raise ValueError(
+                    f"Image token span (batch={batch_idx}) has unexpected length {token_span.shape[0]} "
+                    f"(expected {span_length})."
+                )
+            vectors.append(_pool_image_tokens(token_span, pooling))
+        gathered.append(torch.stack(vectors, dim=0))
+    return gathered
+
+
+def _pool_image_tokens(span: torch.Tensor, pooling: str) -> torch.Tensor:
+    if pooling == "mean":
+        return span.mean(dim=0)
+    if pooling == "first":
+        return span[0]
+    raise ValueError(f"Unsupported image pooling strategy '{pooling}'.")
 
 
 def _to_multilayer_embedding(layers: List[torch.Tensor], *, domain: str) -> MultilayerEmbedding:
@@ -223,6 +261,18 @@ def _resolve_tokenizer(processor):
     raise AttributeError("Processor does not expose a tokenizer-compatible attribute.")
 
 
+def _resolve_image_token_id(tokenizer) -> int:
+    token_id = tokenizer.convert_tokens_to_ids("<image>")
+    if isinstance(token_id, int) and token_id >= 0:
+        return token_id
+    additional_tokens = getattr(tokenizer, "additional_special_tokens", []) or []
+    additional_ids = getattr(tokenizer, "additional_special_tokens_ids", []) or []
+    for token, special_id in zip(additional_tokens, additional_ids):
+        if token == "<image>" and isinstance(special_id, int):
+            return special_id
+    raise ValueError("Unable to resolve a token id for '<image>'.")
+
+
 def _resolve_language_model(model) -> nn.Module:
     for attr in ("language_model", "model"):
         module = getattr(model, attr, None)
@@ -270,3 +320,131 @@ def _ensure_pil(image) -> Image.Image:
         scale = 255.0 if max_val <= 1.0 else 1.0
         array = np.clip(array * scale, 0, 255).astype(np.uint8)
     return Image.fromarray(array).convert("RGB")
+
+
+def _extract_hidden_states(outputs: Any):
+    hidden_states = getattr(outputs, "hidden_states", None)
+    if hidden_states is not None:
+        return hidden_states
+    language_outputs = getattr(outputs, "language_model_outputs", None)
+    if language_outputs is not None:
+        lm_hidden = getattr(language_outputs, "hidden_states", None)
+        if lm_hidden is not None:
+            return lm_hidden
+    raise ValueError(
+        "Model outputs do not contain hidden_states. Ensure output_hidden_states=True is passed to the model call."
+    )
+
+
+def _expanded_token_positions(
+    input_ids: torch.Tensor,
+    *,
+    image_token_id: int,
+    num_image_patches: int,
+    pad_token_id: int | None,
+) -> torch.Tensor:
+    if input_ids.ndim != 2:
+        raise ValueError("input_ids must be 2D [batch, seq_len].")
+    if num_image_patches <= 0:
+        raise ValueError("num_image_patches must be positive.")
+    special_mask = input_ids == image_token_id
+    increments = special_mask.to(dtype=torch.long) * (num_image_patches - 1) + 1
+    positions = torch.cumsum(increments, dim=-1) - 1
+
+    num_special = special_mask.sum(dim=-1)
+    max_special = int(num_special.max().item())
+    max_embed_dim = max_special * (num_image_patches - 1) + input_ids.size(1)
+    nb_image_pad = max_embed_dim - 1 - positions[:, -1]
+
+    left_padding = False
+    if pad_token_id is not None:
+        pad_matches = input_ids[:, -1] == pad_token_id
+        left_padding = torch.sum(pad_matches).item() == 0
+
+    if left_padding:
+        positions = positions + nb_image_pad.unsqueeze(-1)
+
+    return positions
+
+
+def _last_token_positions(attention_mask: torch.Tensor, expanded_positions: torch.Tensor) -> torch.Tensor:
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must be 2D [batch, seq_len].")
+    mask = attention_mask.to(dtype=torch.long)
+    lengths = torch.clamp(mask.sum(dim=1) - 1, min=0)
+    batch = torch.arange(lengths.size(0), device=expanded_positions.device)
+    return expanded_positions[batch, lengths]
+
+
+def _image_token_starts(
+    input_ids: torch.Tensor,
+    expanded_positions: torch.Tensor,
+    *,
+    image_token_id: int,
+    num_image_patches: int,
+) -> torch.Tensor:
+    if num_image_patches <= 0:
+        raise ValueError("num_image_patches must be positive.")
+    batch_size = input_ids.size(0)
+    starts = torch.full((batch_size,), -1, dtype=torch.long, device=input_ids.device)
+    for batch_idx in range(batch_size):
+        matches = torch.nonzero(input_ids[batch_idx] == image_token_id, as_tuple=False).flatten()
+        if matches.numel() == 0:
+            continue
+        first_idx = matches[0]
+        end_pos = expanded_positions[batch_idx, first_idx]
+        starts[batch_idx] = end_pos - (num_image_patches - 1)
+    if torch.any(starts < 0):
+        missing = torch.nonzero(starts < 0, as_tuple=False).flatten().tolist()
+        raise ValueError(f"<image> token missing for samples at indices {missing}.")
+    return starts
+
+
+def _resolve_pad_token_id(tokenizer, model) -> int | None:
+    candidates: Sequence[int | None] = (
+        getattr(tokenizer, "pad_token_id", None),
+        getattr(getattr(tokenizer, "tokenizer", None), "pad_token_id", None),
+        getattr(getattr(model, "config", None), "pad_token_id", None),
+        getattr(tokenizer, "eos_token_id", None),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, int) and candidate >= 0:
+            return candidate
+    return None
+
+
+def _infer_num_image_patches(model) -> int:
+    vision_config = getattr(model, "config", None)
+    if vision_config is not None:
+        vision_config = getattr(vision_config, "vision_config", None)
+    if vision_config is not None:
+        count = _patch_count(
+            getattr(vision_config, "image_size", None),
+            getattr(vision_config, "patch_size", None),
+        )
+        if count is not None:
+            return count
+
+    vision_tower = getattr(model, "vision_tower", None)
+    candidate = getattr(getattr(vision_tower, "config", None), "num_image_tokens", None)
+    if isinstance(candidate, int) and candidate > 0:
+        return candidate
+
+    raise ValueError("Unable to infer the number of image tokens from the model configuration.")
+
+
+def _patch_count(image_size: Any, patch_size: Any) -> int | None:
+    def _size_tuple(value: Any) -> tuple[int, int] | None:
+        if isinstance(value, int):
+            return value, value
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return int(value[0]), int(value[1])
+        return None
+
+    size = _size_tuple(image_size)
+    patches = _size_tuple(patch_size)
+    if size is None or patches is None:
+        return None
+    if patches[0] <= 0 or patches[1] <= 0:
+        return None
+    return (size[0] // patches[0]) * (size[1] // patches[1])

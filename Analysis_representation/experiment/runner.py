@@ -7,7 +7,7 @@ from itertools import combinations
 from typing import Dict, Mapping, Sequence, Tuple
 
 import numpy as np
-
+from pathlib import Path
 from analysis.metrics import cosine_distance_matrix
 from data.schemas import SampleBatch
 from models.embedding import MultilayerEmbedding, encode_examples
@@ -26,6 +26,7 @@ def run_experiment(
     languages: Sequence[str],
     conditions: Mapping[str, ConditionBuilder],
     analysis_config: Mapping[str, object] | None = None,
+    debug_csv_path: Path | None = None,
 ) -> Dict[str, Dict[str, Sequence[float]]]:
     """Return cosine distance lists for each condition/language/layer."""
 
@@ -35,6 +36,7 @@ def run_experiment(
     layer_indices = analysis_config.get("layer_indices", []) or []
 
     results: Dict[str, Dict[str, Sequence[float]]] = {}
+    debug_rows: list[dict[str, object]] = []
     for name, builder in conditions.items():
         conditioned_examples = builder(batch.examples)
         print(
@@ -72,6 +74,10 @@ def run_experiment(
             if not layer_pairs:
                 continue
             for layer_label, text_vectors, image_vectors in layer_pairs:
+                print(
+                    f"[debug][metric-input] lang={language} layer={layer_label} "
+                    f"text_shape={text_vectors.shape} image_shape={image_vectors.shape}"
+                )
                 dist = cosine_distance_matrix(text_vectors, image_vectors)
                 diag = _diagonal(dist)
                 summary = _matrix_stats(dist)
@@ -79,6 +85,18 @@ def run_experiment(
                 distances[metric_name] = diag
                 distances[f"{metric_name}__diag_summary"] = [summary.diag_mean, summary.diag_std]
                 distances[f"{metric_name}__off_summary"] = [summary.off_mean, summary.off_std]
+                debug_rows.append(
+                    {
+                        "condition": name,
+                        "metric_type": "image_text",
+                        "language": language,
+                        "layer": layer_label,
+                        "diag_mean": summary.diag_mean,
+                        "diag_std": summary.diag_std,
+                        "off_mean": summary.off_mean,
+                        "off_std": summary.off_std,
+                    }
+                )
                 _print_distance_stats(
                     condition=name,
                     metric=metric_name,
@@ -100,6 +118,18 @@ def run_experiment(
                 distances[metric_name] = diag
                 distances[f"{metric_name}__diag_summary"] = [summary.diag_mean, summary.diag_std]
                 distances[f"{metric_name}__off_summary"] = [summary.off_mean, summary.off_std]
+                debug_rows.append(
+                    {
+                        "condition": name,
+                        "metric_type": "language_pair",
+                        "language": f"{lang_a}__vs__{lang_b}",
+                        "layer": layer_label,
+                        "diag_mean": summary.diag_mean,
+                        "diag_std": summary.diag_std,
+                        "off_mean": summary.off_mean,
+                        "off_std": summary.off_std,
+                    }
+                )
                 _print_distance_stats(
                     condition=name,
                     metric=metric_name,
@@ -113,6 +143,7 @@ def run_experiment(
     if isinstance(analysis_config, Mapping):
         sanity_cfg = analysis_config.get("sanity_checks", {}) or {}
     _maybe_warn_small_condition_gap(results, sanity_cfg)
+    _write_debug_metrics(debug_rows, debug_csv_path)
     return results
 
 
@@ -310,3 +341,26 @@ def _maybe_warn_small_condition_gap(
         )
         for metric, gap, win in flagged[:8]:
             print(f"  - {metric}: mean_gap={gap:.5f} win_rate={win:.3f}")
+
+
+def _write_debug_metrics(rows: Sequence[Mapping[str, object]], debug_path: Path | None) -> None:
+    if not rows:
+        return
+    import csv
+    output_path = debug_path or Path("results/debug_metrics.csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "condition",
+        "metric_type",
+        "language",
+        "layer",
+        "diag_mean",
+        "diag_std",
+        "off_mean",
+        "off_std",
+    ]
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[debug] metric summaries written to {output_path}")

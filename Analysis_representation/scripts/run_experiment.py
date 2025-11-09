@@ -16,12 +16,14 @@ from models.llava_loader import LLaVAModelLoader, LLaVALoaderConfig
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "settings.yaml"
 DEFAULT_OUTPUT = PROJECT_ROOT / "report" / "distance_map.json"
+DEFAULT_DEBUG_CSV = PROJECT_ROOT / "results" / "debug_metrics.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--debug-csv", type=Path, default=DEFAULT_DEBUG_CSV)
     return parser.parse_args()
 
 
@@ -37,7 +39,7 @@ def _preview_text(text: str, limit: int = 80) -> str:
     return compact[: limit - 3] + "..."
 
 
-def run_pipeline(config_path: Path, summary_path: Path) -> None:
+def run_pipeline(config_path: Path, summary_path: Path, debug_csv_path: Path | None = None) -> None:
     config = load_config(config_path)
     languages: Sequence[str] = config["experiment"]["languages"]
 
@@ -116,6 +118,7 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
         conditions=conditions,
         languages=languages,
         analysis_config=config.get("analysis", {}),
+        debug_csv_path=debug_csv_path,
     )
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,7 +132,7 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    run_pipeline(args.config, args.output)
+    run_pipeline(args.config, args.output, args.debug_csv)
 
 
 if __name__ == "__main__":
