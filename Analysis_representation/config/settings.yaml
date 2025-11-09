@@ -1,18 +1,21 @@
 experiment:
   name: multilingual_alignment_baseline
   seed: 42
-  sample_size: 2
+  sample_size: 10
   languages:
     - en
     - jp-stair
     - cn
+  conditions:
+    mismatched:
+      hard_negative: false
 
 data:
   coco:
     data_dir: /root/personal/datasets/COCO_multilingual/data
     splits:
       - val
-    caption_index: 2
+    caption_index: 4
     filter_empty_languages: true
 
 model:
@@ -27,13 +30,18 @@ analysis:
   metrics:
     - cosine_distance
   statistics:
-    t_test: true
+    t_test: false
   fusion:
-    prompt_with_image: "{image_token}\n{caption}"
-    prompt_text_only: "{caption}"
-    image_pooling: mean
-    keep_image_tokens: false
-    delta_enabled: true
+    image_prompt: "{image_token}"
+    text_prefix: ""
+    text_suffix: ""
+  sanity_checks:
+    enabled: true
+    base_condition: correct
+    compare_condition: mismatched
+    mean_diff_tol: 0.01
+    win_rate_tol: 0.05
+    min_metrics: 5
 
 visualization:
   output_dir: report/figures

@@ -106,11 +106,17 @@ class COCODataset:
         if image is None:
             return None
         # 将 PIL.Image 与必要的 ID/文件名打包成 ImageSample
+        metadata = {
+            "split": sample.get("split"),
+            "category_id": sample.get("category_id") or sample.get("category"),
+            "supercategory": self._extract_supercategory(sample),
+        }
+        filtered_metadata = {key: value for key, value in metadata.items() if value is not None}
         image_sample = ImageSample(
             image_id=int(sample["cocoid"]),
             image_data=image,
             filename=sample.get("filename"),  # type: ignore[arg-type]
-            metadata={"split": sample.get("split")},
+            metadata=filtered_metadata,
         )
         return MultilingualExample(image=image_sample, captions=captions)
 
@@ -165,3 +171,11 @@ class COCODataset:
         if missing:
             raise ValueError(f"Missing requested splits: {', '.join(missing)}")
         return dataset_dict
+
+    @staticmethod
+    def _extract_supercategory(sample: Mapping[str, object]) -> str | None:
+        for key in ("supercategory", "super_category", "superCategory"):
+            value = sample.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None

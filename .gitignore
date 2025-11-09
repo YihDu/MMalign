@@ -5,14 +5,12 @@ MLLM/LLaVA/scripts/v1_5/logs/
 MLLM/LLaVA/scripts/v1_5/wandb/
 Analysis/ckpt/
 Analysis/scripts/pipeline/results/
-Analysis/scripts/utils/__pycache__/
 
 Analysis_representation/data_guide.md
 Analysis_representation/guide.md
 Analysis_representation/docs
-Analysis_representation/experiment/__pycache__
-Analysis_representation/models/__pycache__
-Analysis_representation/analysis/__pycache__/
- Analysis_representation/data/__pycache__
+
 
 */__pycache__/
+
+Analysis_representation/results/

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, Mapping, Sequence, Tuple
 
@@ -73,23 +74,17 @@ def run_experiment(
             for layer_label, text_vectors, image_vectors in layer_pairs:
                 dist = cosine_distance_matrix(text_vectors, image_vectors)
                 diag = _diagonal(dist)
+                summary = _matrix_stats(dist)
                 metric_name = f"cosine_image_text_{language}_{layer_label}"
                 distances[metric_name] = diag
+                distances[f"{metric_name}__diag_summary"] = [summary.diag_mean, summary.diag_std]
+                distances[f"{metric_name}__off_summary"] = [summary.off_mean, summary.off_std]
                 _print_distance_stats(
                     condition=name,
                     metric=metric_name,
                     values=diag,
-                    extra=f"shape={dist.shape}",
+                    extra=summary.message,
                 )
-
-            _record_delta_metrics(
-                distances=distances,
-                condition=name,
-                language=language,
-                text_layers=_select_layers(language_embeddings.text, layer_mode, layer_indices),
-                text_only_layers=_select_layers(language_embeddings.text_only, layer_mode, layer_indices),
-                delta_layers=_select_layers(language_embeddings.delta_text, layer_mode, layer_indices),
-            )
 
         for lang_a, lang_b in combinations(sorted(text_layers_by_language.keys()), 2):
             layers_a = text_layers_by_language[lang_a]
@@ -100,16 +95,24 @@ def run_experiment(
             for layer_label, text_vectors_a, text_vectors_b in layer_pairs:
                 dist = cosine_distance_matrix(text_vectors_a, text_vectors_b)
                 diag = _diagonal(dist)
+                summary = _matrix_stats(dist)
                 metric_name = f"cosine_{lang_a}__vs__{lang_b}_{layer_label}"
                 distances[metric_name] = diag
+                distances[f"{metric_name}__diag_summary"] = [summary.diag_mean, summary.diag_std]
+                distances[f"{metric_name}__off_summary"] = [summary.off_mean, summary.off_std]
                 _print_distance_stats(
                     condition=name,
                     metric=metric_name,
                     values=diag,
-                    extra=f"shape={dist.shape}",
+                    extra=summary.message,
                 )
 
         results[name] = distances
+
+    sanity_cfg = {}
+    if isinstance(analysis_config, Mapping):
+        sanity_cfg = analysis_config.get("sanity_checks", {}) or {}
+    _maybe_warn_small_condition_gap(results, sanity_cfg)
     return results
 
 
@@ -162,6 +165,37 @@ def _diagonal(distances: np.ndarray) -> Sequence[float]:
     return [float(distances[i, i]) for i in range(limit)]
 
 
+@dataclass
+class DistanceMatrixStats:
+    message: str
+    diag_mean: float
+    diag_std: float
+    off_mean: float
+    off_std: float
+
+
+def _matrix_stats(distances: np.ndarray) -> DistanceMatrixStats:
+    diag = np.diag(distances) if distances.ndim == 2 else np.array([])
+    off_mask = ~np.eye(distances.shape[0], dtype=bool) if distances.ndim == 2 else None
+    off_diag = distances[off_mask] if off_mask is not None else np.array([])
+    diag_mean = float(np.mean(diag)) if diag.size else float("nan")
+    diag_std = float(np.std(diag)) if diag.size else float("nan")
+    off_mean = float(np.mean(off_diag)) if off_diag.size else float("nan")
+    off_std = float(np.std(off_diag)) if off_diag.size else float("nan")
+    message = (
+        f"shape={distances.shape} "
+        f"diag_mean={diag_mean:.3f} diag_std={diag_std:.3f} "
+        f"off_mean={off_mean:.3f} off_std={off_std:.3f}"
+    )
+    return DistanceMatrixStats(
+        message=message,
+        diag_mean=diag_mean,
+        diag_std=diag_std,
+        off_mean=off_mean,
+        off_std=off_std,
+    )
+
+
 def _pair_layers(
     layers_a: Sequence[Tuple[str, np.ndarray]],
     layers_b: Sequence[Tuple[str, np.ndarray]],
@@ -183,65 +217,6 @@ def _pair_layers(
         layer_label = label_a if label_a == label_b else f"{label_a}__vs__{label_b}"
         paired.append((layer_label, vectors_a, vectors_b))
     return paired
-
-
-def _record_delta_metrics(
-    *,
-    distances: Dict[str, Sequence[float]],
-    condition: str,
-    language: str,
-    text_layers: Sequence[Tuple[str, np.ndarray]],
-    text_only_layers: Sequence[Tuple[str, np.ndarray]],
-    delta_layers: Sequence[Tuple[str, np.ndarray]],
-) -> None:
-    if not delta_layers or not text_layers or not text_only_layers:
-        return
-
-    layer_map = {label: vectors for label, vectors in text_layers}
-    text_only_map = {label: vectors for label, vectors in text_only_layers}
-    for label, delta_vectors in delta_layers:
-        base = layer_map.get(label)
-        text_only = text_only_map.get(label)
-        if base is None or text_only is None:
-            continue
-        l2_norms = _vector_norms(delta_vectors)
-        metric_l2 = f"delta_h_l2_{language}_{label}"
-        distances[metric_l2] = l2_norms
-        _print_distance_stats(
-            condition=condition,
-            metric=metric_l2,
-            values=l2_norms,
-            extra="l2",
-        )
-        cosine = _cosine_similarity_per_sample(base, text_only)
-        metric_cos = f"delta_h_cos_{language}_{label}"
-        distances[metric_cos] = cosine
-        _print_distance_stats(
-            condition=condition,
-            metric=metric_cos,
-            values=cosine,
-            extra="cos",
-        )
-
-
-def _vector_norms(matrix: np.ndarray) -> Sequence[float]:
-    norms = np.linalg.norm(matrix, axis=1)
-    return norms.tolist()
-
-
-def _cosine_similarity_per_sample(
-    matrix_a: np.ndarray,
-    matrix_b: np.ndarray,
-) -> Sequence[float]:
-    if matrix_a.shape != matrix_b.shape:
-        limit = min(len(matrix_a), len(matrix_b))
-        matrix_a = matrix_a[:limit]
-        matrix_b = matrix_b[:limit]
-    numerator = np.sum(matrix_a * matrix_b, axis=1)
-    denom = np.linalg.norm(matrix_a, axis=1) * np.linalg.norm(matrix_b, axis=1)
-    denom = np.clip(denom, a_min=1e-12, a_max=None)
-    cosine = numerator / denom
-    return cosine.tolist()
 
 
 def _preview_condition_samples(
@@ -287,3 +262,51 @@ def _print_distance_stats(
         f"min={arr.min():.3f} mean={arr.mean():.3f} max={arr.max():.3f} "
         f"first={first_vals} {extra}"
     )
+
+
+def _maybe_warn_small_condition_gap(
+    results: Mapping[str, Mapping[str, Sequence[float]]],
+    sanity_cfg: Mapping[str, object],
+) -> None:
+    if sanity_cfg is False:
+        return
+    enabled = bool(sanity_cfg.get("enabled", True))
+    if not enabled:
+        return
+
+    base_condition = str(sanity_cfg.get("base_condition", "correct"))
+    compare_condition = str(sanity_cfg.get("compare_condition", "mismatched"))
+    mean_tol = float(sanity_cfg.get("mean_diff_tol", 0.01))
+    win_tol = float(sanity_cfg.get("win_rate_tol", 0.05))
+    min_metrics = int(sanity_cfg.get("min_metrics", 5))
+
+    base_metrics = results.get(base_condition)
+    compare_metrics = results.get(compare_condition)
+    if not base_metrics or not compare_metrics:
+        return
+
+    flagged = []
+    for metric, base_values in base_metrics.items():
+        if metric.endswith("__diag_summary") or metric.endswith("__off_summary"):
+            continue
+        compare_values = compare_metrics.get(metric)
+        if compare_values is None:
+            continue
+        arr_base = np.asarray(base_values, dtype=float)
+        arr_comp = np.asarray(compare_values, dtype=float)
+        if arr_base.size == 0 or arr_comp.size == 0 or arr_base.shape != arr_comp.shape:
+            continue
+        diff = arr_comp - arr_base
+        mean_gap = float(np.mean(diff))
+        win_rate = float(np.mean(diff > 0))
+        if abs(mean_gap) < mean_tol and abs(win_rate - 0.5) < win_tol:
+            flagged.append((metric, mean_gap, win_rate))
+
+    if len(flagged) >= max(1, min_metrics):
+        print(
+            "[warn][sanity] 多个 metric 在 "
+            f"{compare_condition} vs {base_condition} 下差异过小 "
+            f"(mean_tol={mean_tol}, win_tol={win_tol})."
+        )
+        for metric, gap, win in flagged[:8]:
+            print(f"  - {metric}: mean_gap={gap:.5f} win_rate={win:.3f}")

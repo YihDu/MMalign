@@ -107,7 +107,8 @@ def run_pipeline(config_path: Path, summary_path: Path) -> None:
     # 因此 build_batch 返回的对象可迭代 for example in batch，或用 batch.examples 直接访问所有 MultilingualExample，方便后续传给 experiment.runner.run_experiment()。
 
     # 执行三种条件，得到完整的 distance_map
-    conditions = build_conditions()
+    condition_overrides = config.get("experiment", {}).get("conditions")
+    conditions = build_conditions(condition_overrides)
     distance_map = run_experiment(
         model=model,
         processor=processor,
