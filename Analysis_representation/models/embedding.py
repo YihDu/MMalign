@@ -33,6 +33,7 @@ class EmbeddingBatch:
 @dataclass
 class SimpleEmbeddingConfig:
     image_prompt: str = "{image_token}"
+    image_token: str = "<image>"
     text_prefix: str = ""
     text_suffix: str = ""
     image_pooling: str = "mean"
@@ -46,15 +47,16 @@ class SimpleEmbeddingConfig:
             raise ValueError("image_pooling must be one of {'mean', 'first'}.")
         return cls(
             image_prompt=str(data.get("image_prompt", cls.image_prompt)),
+            image_token=str(data.get("image_token", cls.image_token)),
             text_prefix=str(data.get("text_prefix", cls.text_prefix)),
             text_suffix=str(data.get("text_suffix", cls.text_suffix)),
             image_pooling=pooling,
         )
 
     def build_image_prompt(self) -> str:
-        prompt = self.image_prompt.replace("{image_token}", "<image>").strip()
-        if "<image>" not in prompt:
-            raise ValueError("image_prompt must include '<image>' token.")
+        prompt = self.image_prompt.replace("{image_token}", self.image_token).strip()
+        if self.image_token not in prompt:
+            raise ValueError("image_prompt must include the configured image_token.")
         return prompt
 
     def build_text(self, caption: str) -> str:
@@ -75,8 +77,10 @@ def encode_examples(
     processor,
     fusion_config: Mapping[str, object] | None = None,
     micro_batch_size: int | None = None,
+    model_context: Mapping[str, object] | None = None,
 ) -> EmbeddingBatch:
     config = SimpleEmbeddingConfig.from_mapping(fusion_config)
+    model_context = model_context or {}
 
     images: List[Image.Image] = []
     texts_by_language: Dict[str, List[str]] = {}
@@ -91,9 +95,10 @@ def encode_examples(
     language_model = _resolve_language_model(model)
     tokenizer = _resolve_tokenizer(processor)
     device, dtype = _module_device_dtype(language_model, fallback_device=_model_device(model))
-    image_token_id = _resolve_image_token_id(tokenizer)
+    image_token_id = _resolve_image_token_id(tokenizer, config.image_token)
     pad_token_id = _resolve_pad_token_id(tokenizer, model)
-    num_image_patches = _infer_num_image_patches(model)
+    use_placeholder_mask = bool(model_context.get("use_image_placeholder_mask", False))
+    num_image_patches = None if use_placeholder_mask else _infer_num_image_patches(model)
     image_pooling = config.image_pooling
 
     # get text embedding
@@ -129,19 +134,27 @@ def encode_examples(
                 attention_mask = processor_inputs.get("attention_mask")
                 if not isinstance(attention_mask, torch.Tensor):
                     raise ValueError("Processor outputs must include attention_mask.")
-                expanded_positions = _expanded_token_positions(
-                    input_ids,
-                    image_token_id=image_token_id,
-                    num_image_patches=num_image_patches,
-                    pad_token_id=pad_token_id,
-                )
-                last_token_positions = _last_token_positions(attention_mask, expanded_positions)
-                image_token_starts = _image_token_starts(
-                    input_ids,
-                    expanded_positions,
-                    image_token_id=image_token_id,
-                    num_image_patches=num_image_patches,
-                )
+                if use_placeholder_mask:
+                    expanded_positions = None
+                    last_token_positions = _last_token_positions_from_mask(attention_mask)
+                else:
+                    expanded_positions = _expanded_token_positions(
+                        input_ids,
+                        image_token_id=image_token_id,
+                        num_image_patches=num_image_patches,
+                        pad_token_id=pad_token_id,
+                    )
+                    last_token_positions = _last_token_positions(attention_mask, expanded_positions)
+                if use_placeholder_mask:
+                    image_token_mask = (input_ids == image_token_id)
+                    image_token_starts = None
+                else:
+                    image_token_starts = _image_token_starts(
+                        input_ids,
+                        expanded_positions,
+                        image_token_id=image_token_id,
+                        num_image_patches=num_image_patches,
+                    )
                 outputs = model(  # type: ignore[call-arg]
                     **processor_inputs,
                     output_hidden_states=True,
@@ -149,12 +162,19 @@ def encode_examples(
                     return_dict=True,
                 )
                 hidden_states = _extract_hidden_states(outputs)
-                image_layers = _image_token_layers(
-                    hidden_states,
-                    image_token_starts,
-                    span_length=num_image_patches,
-                    pooling=image_pooling,
-                )
+                if use_placeholder_mask:
+                    image_layers = _image_token_layers_from_mask(
+                        hidden_states,
+                        image_token_mask,
+                        pooling=image_pooling,
+                    )
+                else:
+                    image_layers = _image_token_layers(
+                        hidden_states,
+                        image_token_starts,
+                        span_length=num_image_patches,
+                        pooling=image_pooling,
+                    )
                 text_layers = _gather_token_layers(hidden_states, last_token_positions)
                 if not text_layers or not image_layers:
                     continue
@@ -213,6 +233,30 @@ def _image_token_layers(
                     f"Image token span (batch={batch_idx}) has unexpected length {token_span.shape[0]} "
                     f"(expected {span_length})."
                 )
+            vectors.append(_pool_image_tokens(token_span, pooling))
+        gathered.append(torch.stack(vectors, dim=0))
+    return gathered
+
+
+def _image_token_layers_from_mask(
+    hidden_states,
+    token_mask: torch.Tensor,
+    *,
+    pooling: str,
+) -> List[torch.Tensor]:
+    if not hidden_states:
+        return []
+    if token_mask.ndim != 2:
+        raise ValueError("token_mask must be a 2D tensor [batch, seq].")
+    usable = hidden_states[1:] if len(hidden_states) > 1 else hidden_states
+    gathered: List[torch.Tensor] = []
+    for layer in usable:
+        vectors: List[torch.Tensor] = []
+        for batch_idx in range(token_mask.size(0)):
+            positions = torch.nonzero(token_mask[batch_idx], as_tuple=False).flatten()
+            if positions.numel() == 0:
+                raise ValueError(f"No image tokens found for sample {batch_idx}.")
+            token_span = layer[batch_idx, positions, :]
             vectors.append(_pool_image_tokens(token_span, pooling))
         gathered.append(torch.stack(vectors, dim=0))
     return gathered
@@ -278,16 +322,16 @@ def _resolve_tokenizer(processor):
     raise AttributeError("Processor does not expose a tokenizer-compatible attribute.")
 
 
-def _resolve_image_token_id(tokenizer) -> int:
-    token_id = tokenizer.convert_tokens_to_ids("<image>")
+def _resolve_image_token_id(tokenizer, image_token: str) -> int:
+    token_id = tokenizer.convert_tokens_to_ids(image_token)
     if isinstance(token_id, int) and token_id >= 0:
         return token_id
     additional_tokens = getattr(tokenizer, "additional_special_tokens", []) or []
     additional_ids = getattr(tokenizer, "additional_special_tokens_ids", []) or []
     for token, special_id in zip(additional_tokens, additional_ids):
-        if token == "<image>" and isinstance(special_id, int):
+        if token == image_token and isinstance(special_id, int):
             return special_id
-    raise ValueError("Unable to resolve a token id for '<image>'.")
+    raise ValueError(f"Unable to resolve a token id for '{image_token}'.")
 
 
 def _resolve_language_model(model) -> nn.Module:
@@ -391,6 +435,13 @@ def _last_token_positions(attention_mask: torch.Tensor, expanded_positions: torc
     lengths = torch.clamp(mask.sum(dim=1) - 1, min=0)
     batch = torch.arange(lengths.size(0), device=expanded_positions.device)
     return expanded_positions[batch, lengths]
+
+
+def _last_token_positions_from_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must be 2D [batch, seq_len].")
+    mask = attention_mask.to(dtype=torch.long)
+    return torch.clamp(mask.sum(dim=1) - 1, min=0)
 
 
 def _image_token_starts(

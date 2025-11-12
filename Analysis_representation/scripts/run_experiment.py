@@ -12,6 +12,7 @@ import yaml
 from data import COCODataset
 from experiment import build_conditions, run_experiment
 from models.llava_loader import LLaVAModelLoader, LLaVALoaderConfig
+from models.qwen_loader import QwenModelLoader, QwenLoaderConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "settings.yaml"
@@ -60,16 +61,28 @@ def run_pipeline(config_path: Path, summary_path: Path, debug_csv_path: Path | N
     
 
     print("加载 model")
-    # 初始化 LLaVA 模型与对应 Processor
-    loader = LLaVAModelLoader(
-        LLaVALoaderConfig(
-            model_name=config["model"]["name"],
-            revision=config["model"].get("revision"),
-            device=config["model"].get("device", "cpu"),
-            dtype=config["model"].get("dtype", "auto"),
+    model_cfg = config["model"]
+    model_type = str(model_cfg.get("type", "llava")).lower()
+    if model_type == "qwen-vl":
+        loader = QwenModelLoader(
+            QwenLoaderConfig(
+                model_name=model_cfg["name"],
+                revision=model_cfg.get("revision"),
+                device=model_cfg.get("device", "cpu"),
+                dtype=model_cfg.get("dtype", "auto"),
+            )
         )
-    )
+    else:
+        loader = LLaVAModelLoader(
+            LLaVALoaderConfig(
+                model_name=model_cfg["name"],
+                revision=model_cfg.get("revision"),
+                device=model_cfg.get("device", "cpu"),
+                dtype=model_cfg.get("dtype", "auto"),
+            )
+        )
     model, processor = loader.load()
+    embedding_context = loader.embedding_context()
 
 
     print("加载 model 完毕")
@@ -119,6 +132,7 @@ def run_pipeline(config_path: Path, summary_path: Path, debug_csv_path: Path | N
         conditions=conditions,
         languages=languages,
         analysis_config=config.get("analysis", {}),
+        embedding_context=embedding_context,
         debug_csv_path=debug_csv_path,
         micro_batch_size=micro_batch_size,
     )

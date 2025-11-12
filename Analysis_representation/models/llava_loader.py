@@ -38,6 +38,14 @@ class LLaVAModelLoader:
             self._model.to(self._config.device)
         return self._model, self._processor
 
+    def embedding_context(self) -> Dict[str, Any]:
+        """Hints for downstream embedding extraction."""
+
+        return {
+            "model_type": "llava",
+            "use_image_placeholder_mask": False,
+        }
+
     @property
     def model(self) -> Any:
         if self._model is None:

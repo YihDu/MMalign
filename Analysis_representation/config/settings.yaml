@@ -19,9 +19,16 @@ data:
     caption_index: 4
     filter_empty_languages: true
 
+# model:
+#   type: qwen-vl
+#   name: llava-hf/llava-1.5-7b-hf
+#   revision: 'a272c74' # 否则会有Bug
+#   device: cuda
+#   dtype: auto
+
 model:
-  name: llava-hf/llava-1.5-7b-hf
-  revision: 'a272c74' # 否则会有Bug
+  type: qwen-vl
+  name: /root/personal/hf_models/Qwen-VL-2.5/7B-Instruct
   device: cuda
   dtype: auto
 
@@ -32,10 +39,17 @@ analysis:
     - cosine_distance
   statistics:
     t_test: false
+  # fusion:
+  #   image_prompt: "{image_token}"
+  #   image_token: "<image>"
+  #   text_prefix: ""
+  #   text_suffix: ""
+  #   image_pooling: mean
   fusion:
-    image_prompt: "{image_token}"
-    text_prefix: ""
-    text_suffix: ""
+    image_token: "<|image_pad|>"
+    image_prompt: "<|vision_start|>{image_token}<|vision_end|>"
+    text_prefix: "<|im_start|>user\n"
+    text_suffix: "<|im_end|>\n<|im_start|>assistant\n"
     image_pooling: mean
   sanity_checks:
     enabled: true
