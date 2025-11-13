@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+# 之前的版本
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import time
@@ -18,7 +18,7 @@ from qwen_vl_utils import process_vision_info
 import time
 
 
-class HiddenStateDataset(Dataset):
+class PM4BenchVQA(Dataset):
     def __init__(self, data_path, langs, max_samples=None):
         self.data_path = data_path
         self.langs = langs
@@ -101,24 +101,21 @@ def main(args):
     print(f"langs={langs}, batch={batch_size}, layer_interval={layer_interval}, cache_every={cache_every}\n")
 
     # ---------------- Load model and processor ----------------
-    print(f"🚀 Loading model from {model_path}")
+    print(f"Loading model from {model_path}")
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype='auto',
-        attn_implementation="flash_attention_2",
-        device_map="cuda:0",
+        # attn_implementation="eager",
+        device_map="cuda",
     ).to("cuda")
     processor = AutoProcessor.from_pretrained(model_path)
     model.eval()
     processor.tokenizer.padding_side = "left"
-    print("✅ Model loaded and configured.\n")
+    print("Model loaded! \n")
 
     # ---------------- Load dataset ----------------
-    dataset = HiddenStateDataset(data_path, langs, max_samples)
+    dataset = PM4BenchVQA(data_path, langs, max_samples)
 
-    # ============================================================
-    # Process each language independently
-    # ============================================================
     for lang in langs:
         skipped_batches = 0
         skipped_samples = 0
@@ -129,7 +126,7 @@ def main(args):
             lang_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=8,
+            num_workers=0,
             collate_fn=custom_collate_fn,
             pin_memory=True,
         )

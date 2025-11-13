@@ -97,7 +97,7 @@ def main():
     grouped = load_hidden_states(Path(args.data_dir), langs)
     df = compute_alignment(grouped, langs, args.metric)
     df.to_csv(args.save_path, index=False)
-    print(f"✅ Saved results to {args.save_path}")
+    print(f"Saved results to {args.save_path}")
 
 
 if __name__ == "__main__":
