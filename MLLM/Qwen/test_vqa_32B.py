@@ -4,24 +4,21 @@
 # 多卡推理
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
-import time
 from tqdm import tqdm
-
 import argparse
 import json
 import base64
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
-import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 import time
-import torch
+
 log_file = open("log(Qwen_7B_1113).log", "a")
 
 def log(msg):
@@ -108,7 +105,7 @@ def main(args):
     layer_interval = args.layer_interval
     cache_every = 8
 
-    batch_size = len(langs)  # ★ 多语言对齐的批大小 = 语言数
+    batch_size = len(langs)  # 多语言对齐的批大小 = 语言数
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -118,10 +115,14 @@ def main(args):
     print(f"Loading model from {model_path}")
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_path,
-        torch_dtype='auto',
+        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="cuda",
-    ).to("cuda")
+        device_map="auto",
+        max_memory={
+        0: "130GiB",                    
+        1: "130GiB",
+        },
+        )
     processor = AutoProcessor.from_pretrained(model_path)
     model.eval()
     processor.tokenizer.padding_side = "left"
@@ -238,7 +239,7 @@ def main(args):
                 truncation=True,
                 return_tensors="pt",
                 max_length=8192,
-            ).to("cuda")
+            )
             
             # vision special tokens
             vstart = processor.tokenizer.convert_tokens_to_ids("<|vision_start|>")
@@ -316,15 +317,6 @@ def main(args):
                 else hidden_states[::layer_interval]
             )
             selected_layers = [h.to(torch.float16).cpu() for h in selected_layers]
-
-            # ---------------- Cache per-sample results ----------------
-            # for i, (qid, lang) in enumerate(zip(batch["qids"], batch["langs"])):
-            #     hs_to_save = [layer_hs[i].mean(dim=0) for layer_hs in selected_layers]
-
-            #     if batch_idx == 0 and i < 3:
-            #         print(f"[Sample {qid}-{lang}] mean={hs_to_save[0].mean():.4f}, std={hs_to_save[0].std():.4f}")
-
-            #     cache.append((qid, lang, hs_to_save))
             
             for i, (qid, lang) in enumerate(zip(batch["qids"], batch["langs"])):
 

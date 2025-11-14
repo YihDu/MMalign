@@ -1,7 +1,7 @@
 #!/bin/bash
 
-DATA_DIR="/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/7B/hidden_state/"
-OUT_DIR="/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/7B/results"
+DATA_DIR="/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/32B/hidden_state/"
+OUT_DIR="/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/32B/results"
 mkdir -p $OUT_DIR
 
 # : << 'EOF'

@@ -1,20 +1,22 @@
 #!/bin/bash
 
+# 从csv画图
 # ========== model folders ==========
 MODEL_DIRS=(
   "/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/3B/results"
   "/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/7B/results"
+  "/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/32B/results"
 )
 
 LABELS=(
   "Qwen2.5-VL-3B"
   "Qwen2.5-VL-7B"
+  "Qwen2.5-VL-32B"
 )
 
-# You only specify metrics names
 # METRICS=("cka" "cosine" "cosine_norm")
-METRICS=("cka")
-OUT_DIR="/root/personal/plots"
+METRICS=("cka" "cosine" "cosine_norm")
+OUT_DIR="/root/personal/expriments/results_vqa_multilingual/Qwen-VL-v25/plots/"
 mkdir -p "$OUT_DIR"
 
 python visualization/plot_multi.py \

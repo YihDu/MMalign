@@ -12,7 +12,7 @@ MAX_SAMPLES=0
 layer_interval=1
 batch_size=10
 
-python test_vqa_2.py \
+python test_vqa_32B.py \
   --data_path "$DATA_PATH" \
   --model_path "$MODEL_PATH" \
   --save_dir "$SAVE_DIR" \
@@ -22,3 +22,5 @@ python test_vqa_2.py \
   --batch_size "$batch_size"
 
 echo "✅ Finished! Results saved under $SAVE_DIR"
+
+# LANGS="EN,KO,SR,HU,AR,CS,TH,ZH,RU,VI"

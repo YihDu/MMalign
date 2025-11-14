@@ -24,17 +24,15 @@ def plot_metric_for_models(model_dirs, labels, metric, save_path):
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    colors = ["#51A2FF", "#FF7F50", "#3CB371", "#C71585", "#FFD700", "#9370DB"]
+    colors = ["#CA3519", "#E85D45", "#F2A497", "#C71585", "#FFD700", "#9370DB"]
 
     # ==== 自动设置 y 轴标签 ====
     ylabels = {
         "cka": "CKA",
         "cosine": "Cosine Similarity",
         "cosine_norm": "Cosine Similarity (Normalized)",
-        "diag_mean": "Diagonal Mean",
-        "attention": "Attention Score",
     }
-    ylabel = ylabels.get(metric.lower(), metric.upper())  # fallback to METRIC
+    ylabel = ylabels.get(metric.lower(), metric.upper()) 
 
     # ====================================================
 
@@ -62,7 +60,7 @@ def plot_metric_for_models(model_dirs, labels, metric, save_path):
             norm_layers,
             mean_vals,
             linestyle="--",
-            marker='o',
+            marker='.',
             markersize=4,
             color=color,
             label=label
@@ -77,9 +75,9 @@ def plot_metric_for_models(model_dirs, labels, metric, save_path):
         )
 
     # ---- Axis settings ----
-    ax.set_xlim(0, 1)
+    ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(0.2, 1.2)
-    ax.set_xlabel("Normalized Layer (0 → 1)", fontfamily='Arial')
+    ax.set_xlabel("Layer (Normalized)", fontfamily='Arial')
     ax.set_ylabel(ylabel, fontfamily='Arial')   # ⭐ 使用自动 y 轴标签
 
     ax.set_title(f"PM4Bench-MDUR ({metric.upper()})", fontfamily='Arial')
@@ -88,13 +86,11 @@ def plot_metric_for_models(model_dirs, labels, metric, save_path):
     prop={"family": "Arial"},
     loc="upper center",
     bbox_to_anchor=(0.5, -0.15),
-    ncol=2,)
+    ncol=3,)
 
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     print(f"Saved plot to {save_path}")
-
-
 
 def main():
     parser = argparse.ArgumentParser(description="Plot metrics for multiple models")

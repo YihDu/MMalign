@@ -8,19 +8,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import time
 from tqdm import tqdm
-
 import argparse
 import json
 import base64
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
-import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
-import time
-import torch
+
 log_file = open("log(Qwen_7B_1113).log", "a")
 
 def log(msg):
@@ -43,7 +40,6 @@ class PM4BenchVQA(Dataset):
 
                 s = json.loads(line)
 
-                # decode all images only once
                 pil_images = [
                     Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
                     for b64 in s["images"]
@@ -204,10 +200,8 @@ def main(args):
             log(f"QIDs: {batch['qids']}")
             log(f"LANGs: {batch['langs']}")
 
-            # 文本长度
-            log("text lens: " + str([len(t) for t in batch['texts']]))
 
-            # 图片尺寸
+            log("text lens: " + str([len(t) for t in batch['texts']]))
             log("image sizes: " + str([im.size for im in batch['images']]))
             
             # ---------------- build messages ----------------
@@ -239,47 +233,39 @@ def main(args):
                 max_length=8192,
             ).to("cuda")
             
-            # vision special tokens
             vstart = processor.tokenizer.convert_tokens_to_ids("<|vision_start|>")
             vend = processor.tokenizer.convert_tokens_to_ids("<|vision_end|>")
             
-            # ===== DEBUG: Check input shapes / NaN / vision tokens =====
             log(f"input_ids shape: {inputs['input_ids'].shape}")
             log(f"attention_mask shape: {inputs['attention_mask'].shape}")
-
-
 
             vstart_count = (inputs["input_ids"] == vstart).sum().item()
             vend_count = (inputs["input_ids"] == vend).sum().item()
             log(f"vision_start count = {vstart_count}, vision_end count = {vend_count}")
 
-            # check NaN
+
             has_nan = torch.isnan(inputs["input_ids"].float()).any().item()
             log(f"NaN in input_ids: {has_nan}")
 
-            # check sequence max length for debugging
             seq_len = inputs["input_ids"].shape[1]
             log(f"Sequence length = {seq_len}")
 
             t1 = time.time()
 
-            # ---------------- Forward pass ----------------
             try:
                 outputs = model(**inputs, output_hidden_states=True)
 
-            except Exception as e:  # 一定要捕获所有异常，包括 CUDA RuntimeError
+            except Exception as e: 
                 err = str(e)
 
                 log(f"[ERROR] Batch {batch_idx} crash!")
                 log(f"Exception: {repr(e)}")
 
-                # 打印前 50 个 token
                 try:
                     log("First 50 input_ids: " + str(inputs["input_ids"][0][:50].tolist()))
                 except Exception:
                     log("Failed to print input_ids preview.")
 
-                # 打印 vision token 在序列中位置
                 try:
                     pos = [
                         i for i, x in enumerate(inputs["input_ids"][0].tolist())
@@ -289,7 +275,6 @@ def main(args):
                 except Exception:
                     log("Failed to locate vision tokens.")
 
-                # 打印对应文本（非常重要）
                 try:
                     kill_text = batch['texts'][0].replace("\n", "\\n")[:300]
                     log("Sample text preview: " + kill_text)
@@ -302,28 +287,17 @@ def main(args):
                     torch.cuda.empty_cache()
                     continue
 
-                # 其它异常必须重新抛出
                 raise e
 
             hidden_states = outputs.hidden_states
             t2 = time.time()
-
-            # ---------------- Select layers ----------------
+            
             selected_layers = (
                 [hidden_states[-1]]
                 if layer_interval == 0
                 else hidden_states[::layer_interval]
             )
             selected_layers = [h.to(torch.float16).cpu() for h in selected_layers]
-
-            # ---------------- Cache per-sample results ----------------
-            # for i, (qid, lang) in enumerate(zip(batch["qids"], batch["langs"])):
-            #     hs_to_save = [layer_hs[i].mean(dim=0) for layer_hs in selected_layers]
-
-            #     if batch_idx == 0 and i < 3:
-            #         print(f"[Sample {qid}-{lang}] mean={hs_to_save[0].mean():.4f}, std={hs_to_save[0].std():.4f}")
-
-            #     cache.append((qid, lang, hs_to_save))
             
             for i, (qid, lang) in enumerate(zip(batch["qids"], batch["langs"])):
 
@@ -352,20 +326,15 @@ def main(args):
                 for layer_hs in selected_layers:  # layer_hs: [B, T, D]
                     seq_hs = layer_hs[i]          # [T, D]
 
-                    # 1. 取文本 token 区间
                     text_ids = seq_ids[text_start:]
                     text_hs = seq_hs[text_start:]
 
-                    # 2. 确保设备一致
-                    # 将 text_ids 移到与 text_hs 相同的设备
                     text_ids = text_ids.to(text_hs.device)
                     
-                    # 创建 mask 并确保在相同设备
                     non_pad_mask = (text_ids != pad_id)
                     text_hs = text_hs[non_pad_mask]
 
                     if text_hs.size(0) == 0:
-                        # 创建零向量时也要确保设备一致
                         per_layer_repr.append(torch.zeros(seq_hs.size(1), device=text_hs.device))
                     else:
                         per_layer_repr.append(text_hs.mean(dim=0))
@@ -405,9 +374,6 @@ def save_cache_batch(data_list, lang_save_dirs):
             torch.save(hs, save_path)
         except Exception as e:
             print(f"[⚠️] Failed to save {qid}_{lang}: {e}")
-
-
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
